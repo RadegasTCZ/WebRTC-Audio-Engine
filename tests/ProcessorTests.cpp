@@ -182,6 +182,48 @@ int main()
         EXPECT(step < 1.5f * maxSlope && AllFinite(y), "slider change clicks");
     }
 
+    std::printf("[8c] limiter: a +6 dBFS tone is held at or below -1 dBFS; off = untouched\n");
+    {
+        Settings lim = def; lim.nsEnabled = 0; lim.hpfEnabled = 0;
+        auto loud = Sine(frames, 1000.0f, 2.0f);
+        VoiceProcessor vp; vp.Prepare(kCh, 48000, lim);
+        std::vector<float> y(loud.size());
+        vp.Process(loud.data(), y.data(), frames, lim);
+        float peak = 0;
+        for (size_t i = half; i < y.size(); ++i) peak = std::max(peak, std::fabs(y[i]));
+        std::printf("    peak %.3f (ceiling 0.891), reduction %.1f dB\n", peak, vp.LimiterReductionDb());
+        EXPECT(peak <= 0.8913f && AllFinite(y), "limiter let %.3f through", peak);
+        Settings off = lim; off.limiterEnabled = 0;
+        VoiceProcessor v2; v2.Prepare(kCh, 48000, off);
+        v2.Process(loud.data(), y.data(), frames, off);
+        peak = 0;
+        for (size_t i = half; i < y.size(); ++i) peak = std::max(peak, std::fabs(y[i]));
+        EXPECT(peak > 1.9f, "limiter off still limits (peak %.3f)", peak);
+    }
+
+    std::printf("[8d] AGC2: runs finite; parameter changes swap stages live; slider ignored while AGC is on\n");
+    {
+        Settings agc = def; agc.agcEnabled = 1;
+        auto quiet = sig;  // noise + speech-like bursts
+        for (auto& v : quiet) v *= 0.1f;
+        VoiceProcessor vp; vp.Prepare(kCh, 48000, agc);
+        std::vector<float> y(quiet.size());
+        int pos = 0, k = 0;
+        while (pos < frames)
+        {
+            const int n = std::min(480, frames - pos);
+            if (k == 100) { Settings s2 = agc; s2.agcMaxGainDb = 50; s2.agcHeadroomDb = 3; vp.RequestAgcParams(s2); }
+            if (k == 200) { Settings s3 = agc; s3.agcSpeedDbPerSec = 10; vp.RequestAgcParams(s3); }
+            vp.Process(quiet.data() + static_cast<size_t>(pos) * kCh, y.data() + static_cast<size_t>(pos) * kCh, n, agc, 30.0f);
+            pos += n; ++k;
+        }
+        std::printf("    AGC gain at end %.1f dB, output rms %.1f dBFS (input %.1f dBFS)\n", vp.AgcGainDb(),
+                    RmsDb(y, half, y.size()), RmsDb(quiet, half, quiet.size()));
+        EXPECT(AllFinite(y), "AGC produced non-finite output");
+        // With +30 dB slider ignored, the output must not be ~30 dB louder than AGC alone would make it.
+        EXPECT(RmsDb(y, half, y.size()) < RmsDb(quiet, half, quiet.size()) + 52.0, "slider gain leaked through with AGC on");
+    }
+
     std::printf("[9] unsupported formats stay inactive\n");
     VoiceProcessor p;
     EXPECT(!p.Prepare(2, 4000, def) && !p.IsActive(), "4 kHz should be refused");

@@ -1,20 +1,41 @@
 # Third-party code
 
-## WebRTC noise suppressor: `third_party/webrtc/`
+This project is GPL-3.0-or-later (see `LICENSE`). Third-party components keep their own licences.
 
-- Taken from the owner's plugin repo https://github.com/RadegasTCZ/Noise-suppression-VST,
-  v2.1.0, commit `b4d0309c9add167819c0bc3b2b4ccef0f586150f`, folder `ThirdParty/webrtc/`. Copied unchanged.
-- That copy comes from upstream https://webrtc.googlesource.com/src, revision
-  `b58dcf8fec3ad5291fb99c7e29650737ae7db953` (2026-10-02).
-- License: BSD-3-Clause (`webrtc/LICENSE`) plus the WebRTC patent grant (`webrtc/PATENTS`). The Ooura FFT has its own
-  permissive license (`webrtc/common_audio/third_party/ooura/LICENSE`).
-- Contents:
-  - `modules/audio_processing/ns/*`
-  - `modules/audio_processing/three_band_filter_bank.*`
-  - `common_audio/third_party/ooura/fft_size_256/fft4g.*`
-  - shims for `rtc_base/checks.h` and `modules/audio_processing/audio_buffer.h`, under `shim/`
-- Local patch (inherited from the plugin): `NoiseSuppressor::Reset()` restores the constructor state without allocating.
-  The shims and this patch are documented in the plugin's `ThirdParty/UPSTREAM.md`.
-- Behaviour:
-  - The three-band filter bank plus the NS overlap delay the signal by 46 + 3*96 = 334 samples at 48 kHz.
-  - NS works in the int16 range, so we scale by 32768 on the way in and 1/32768 on the way out.
+## WebRTC, Abseil, RNNoise weights, PFFFT (fetched, not stored in the repo)
+
+`scripts/Fetch-Upstream.ps1` downloads the pinned sources into `<workspace>/upstream/`.
+`cmake/WebrtcUpstream.cmake` builds the parts we use into the static library `webrtc_apm`:
+AEC3, NS, AGC2 with the RNN VAD and limiter, AudioBuffer with its splitting filters, and their
+common_audio, rtc_base, api and system_wrappers dependencies.
+The file lists and revisions follow the owner's AEC3-Echo-Canceller plugin (`tools/aec3-build`).
+
+| Source | Revision | Licence |
+|---|---|---|
+| WebRTC, https://webrtc.googlesource.com/src | `b58dcf8fec3ad5291fb99c7e29650737ae7db953` (2026-10-02) | BSD-3-Clause + patent grant (`upstream/webrtc/LICENSE`, `PATENTS`) |
+| Abseil, https://github.com/abseil/abseil-cpp | `972e4ab4a076fca3adbba69b64f2fcdbc78d0e52` | Apache-2.0 |
+| Chromium `third_party/rnnoise` (RNN VAD weights) | `6eabe54fa1` | BSD-3-Clause |
+| Chromium `third_party/pffft` | `6eabe54fa1` | FFTPACK-style BSD licence |
+
+No upstream file is modified. Two notes on the build:
+- The MSVC build links `winmm` (`timeGetTime`).
+- `matched_filter_avx2.cc` is replaced by a stub, because it uses a GCC vector extension.
+
+## `third_party/webrtc_stubs/`
+
+Four small files copied from the AEC3-Echo-Canceller plugin (`tools/aec3-build/stubs`):
+- a task-queue factory that is never run;
+- `RtcEventLogNull::StartLogging`;
+- the AVX2 matched filter routed to SSE2;
+- an empty field-trial list.
+
+## `third_party/speexdsp/`: SpeexDSP resampler
+
+- Copied unchanged from the owner's Noise-suppression-VST v2.1.0 (`ThirdParty/speexdsp`), which records upstream 1.2.1 and its two local Windows-config patches in its own `ThirdParty/UPSTREAM.md`.
+- BSD-3-Clause (`COPYING`).
+- Only `resample.c` and its headers are used, as a float build with quality 5.
+
+## Adapted code
+
+- `src/AgcStage.*` (AGC2 stage and -1 dBFS limiter) is adapted from AEC3-Echo-Canceller `Source/AgcStage.*` and `Source/OutputLimiter.*` (GPLv3, same author).
+- The AGC presets (gentle / normal / strong) come from AEC3-Echo-Canceller `Source/AgcPresets.cpp`.

@@ -11,25 +11,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Static CRT: audiodg must not depend on a VC++ redistributable being installed.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# --- WebRTC noise suppressor (vendored, see third_party/UPSTREAM.md) + our processing core
-file(GLOB WEBRTC_NS_SOURCES CONFIGURE_DEPENDS third_party/webrtc/modules/audio_processing/ns/*.cc)
+# --- Upstream WebRTC (AEC3, NS, AGC2, limiter), built from pinned sources (scripts/Fetch-Upstream.ps1)
+include(cmake/WebrtcUpstream.cmake)
+
+# --- Our processing core
 add_library(voice_core STATIC
-  ${WEBRTC_NS_SOURCES}
-  third_party/webrtc/modules/audio_processing/three_band_filter_bank.cc
-  third_party/webrtc/common_audio/third_party/ooura/fft_size_256/fft4g.cc
   third_party/speexdsp/resample.c
   src/VoiceProcessor.cpp
   src/VoiceProcessor.h
   src/Settings.cpp
   src/Settings.h
+  src/AgcStage.cpp
+  src/AgcStage.h
   src/Log.cpp
   src/Log.h
 )
-target_include_directories(voice_core PUBLIC third_party/webrtc/shim third_party/webrtc third_party/speexdsp)
+target_include_directories(voice_core PUBLIC third_party/speexdsp)
 set_source_files_properties(third_party/speexdsp/resample.c PROPERTIES COMPILE_OPTIONS "/W0")
 target_compile_definitions(voice_core PUBLIC NOMINMAX _USE_MATH_DEFINES)
 target_compile_options(voice_core PRIVATE /W3 /guard:cf)
-set_source_files_properties(${WEBRTC_NS_SOURCES} PROPERTIES COMPILE_OPTIONS "/W0")
+target_link_libraries(voice_core PUBLIC webrtc_apm)
 
 add_library(WebrtcVoiceApo SHARED
   src/DllMain.cpp

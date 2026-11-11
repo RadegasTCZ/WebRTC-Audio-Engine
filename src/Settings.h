@@ -15,6 +15,13 @@ struct Settings
     uint32_t nsLevel = 1;       // 0 = 6 dB, 1 = 12 dB, 2 = 18 dB, 3 = 21 dB
     uint32_t gainMode = 0;      // mic volume slider in software (effect pack only):
                                 // 0 = auto (not for USB/Bluetooth, whose volume is in hardware), 1 = always, 2 = never
+                                // While AGC2 is on, the slider gain is not applied (AGC sets the level).
+    uint32_t agcEnabled = 0;    // WebRTC AGC2 adaptive digital gain (after NS)
+    int32_t agcHeadroomDb = 5;      // 0..20      presets: gentle 8 / normal 5 / strong 3
+    int32_t agcMaxGainDb = 30;      // 1..50      presets: gentle 20 / normal 30 / strong 50
+    int32_t agcSpeedDbPerSec = 6;   // 1..30      presets: gentle 3 / normal 6 / strong 10
+    int32_t agcNoiseCeilingDbfs = -50; // -80..-20 presets: gentle -60 / normal -50 / strong -45
+    uint32_t limiterEnabled = 1;    // -1 dBFS safety limiter, last in the chain
 
     bool operator==(const Settings&) const = default;
 
@@ -34,4 +41,8 @@ namespace settings
 
     // For tests: publish a snapshot directly.
     void Publish(const Settings& s) noexcept;
+
+    // Called on the watcher thread (non-RT) after each change, e.g. to rebuild stages that allocate.
+    using ChangeHook = void (*)(const Settings&);
+    void SetChangeHook(ChangeHook hook) noexcept;
 }

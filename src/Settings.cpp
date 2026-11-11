@@ -17,6 +17,7 @@ namespace
     std::atomic<bool> g_initialised{false};
 
     std::atomic<bool> g_watcherStarted{false};
+    std::atomic<settings::ChangeHook> g_hook{nullptr};
     HKEY g_key = nullptr;
     HANDLE g_event = nullptr;
     HANDLE g_wait = nullptr;
@@ -33,7 +34,13 @@ namespace
         const Settings old = settings::Current();
         settings::Publish(s);
         if (!(s == old))
-            apolog::Write(L"[settings] bypass=%u hpf=%u@%uHz ns=%u level=%u gainMode=%u", s.bypass, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel, s.gainMode);
+        {
+            apolog::Write(L"[settings] bypass=%u hpf=%u@%uHz ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u",
+                          s.bypass, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel, s.gainMode, s.agcEnabled, s.agcHeadroomDb,
+                          s.agcMaxGainDb, s.agcSpeedDbPerSec, s.agcNoiseCeilingDbfs, s.limiterEnabled);
+            if (auto hook = g_hook.load())
+                hook(s);
+        }
         Arm();
     }
 }
@@ -53,6 +60,19 @@ Settings Settings::ReadFromRegistry() noexcept
     read(L"NsLevel", s.nsLevel);
     read(L"GainMode", s.gainMode);
     if (s.gainMode > 2) s.gainMode = 0;
+    auto readInt = [&](const wchar_t* name, int32_t& value, int32_t lo, int32_t hi) {
+        uint32_t v = static_cast<uint32_t>(value);
+        read(name, v);
+        value = std::clamp(static_cast<int32_t>(v), lo, hi);
+    };
+    read(L"AgcEnabled", s.agcEnabled);
+    readInt(L"AgcHeadroomDb", s.agcHeadroomDb, 0, 20);
+    readInt(L"AgcMaxGainDb", s.agcMaxGainDb, 1, 50);
+    readInt(L"AgcSpeedDbPerSec", s.agcSpeedDbPerSec, 1, 30);
+    readInt(L"AgcNoiseCeilingDbfs", s.agcNoiseCeilingDbfs, -80, -20);
+    read(L"LimiterEnabled", s.limiterEnabled);
+    s.agcEnabled = s.agcEnabled ? 1u : 0u;
+    s.limiterEnabled = s.limiterEnabled ? 1u : 0u;
 
     s.bypass = s.bypass ? 1u : 0u;
     s.hpfEnabled = s.hpfEnabled ? 1u : 0u;
@@ -99,6 +119,8 @@ namespace settings
     }
 
     bool WatcherStarted() noexcept { return g_watcherStarted.load(); }
+
+    void SetChangeHook(ChangeHook hook) noexcept { g_hook.store(hook); }
 
     void EnsureWatcher() noexcept
     {
