@@ -439,12 +439,16 @@ STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CON
 namespace
 {
     constexpr GUID kModeCommunications = {0x98951333, 0xB9CD, 0x48B1, {0xA0, 0xA3, 0xFF, 0x40, 0x68, 0x2D, 0x73, 0xF7}};
+    constexpr GUID kModeDefault = {0xC18E2F7E, 0x933D, 0x4965, {0xB7, 0xD1, 0x1E, 0xEF, 0x22, 0x8D, 0x2A, 0xF3}};
+    constexpr GUID kModeSpeech = {0xFC1CFC9B, 0xB9D6, 0x4CFA, {0xB5, 0xE0, 0x4B, 0xB2, 0x16, 0x68, 0x78, 0xB2}};
 }
 
 bool CProbeApo::IsAecCandidate() const noexcept
 {
-    // An AEC APO must be a capture mode effect; the AecApo sample only accepts COMMUNICATIONS mode.
-    return m_slot == ApoSlot::Pack && IsEqualGUID(m_mode, kModeCommunications);
+    // An AEC APO must be a capture mode effect. Microsoft's AecApo sample only accepts COMMUNICATIONS;
+    // the owner wants AEC for DEFAULT (most apps) and SPEECH too. RAW streams skip mode effects anyway.
+    return m_slot == ApoSlot::Pack &&
+           (IsEqualGUID(m_mode, kModeCommunications) || IsEqualGUID(m_mode, kModeDefault) || IsEqualGUID(m_mode, kModeSpeech));
 }
 
 STDMETHODIMP CProbeApo::GetDesiredReferenceStreamProperties(APO_REFERENCE_STREAM_PROPERTIES* pProperties)
