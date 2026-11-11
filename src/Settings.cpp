@@ -95,6 +95,38 @@ Settings Settings::ReadFromRegistry() noexcept
     return s;
 }
 
+LONG Settings::WriteToRegistry(const Settings& s) noexcept
+{
+    HKEY key = nullptr;
+    // KEY_SET_VALUE only: Users have SetValue on this key (created by the install scripts).
+    LONG err = RegOpenKeyExW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, 0, KEY_SET_VALUE, &key);
+    if (err != ERROR_SUCCESS)
+        return err;
+    auto put = [&](const wchar_t* name, uint32_t v) {
+        DWORD d = v;
+        const LONG e = RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&d), sizeof(d));
+        if (e != ERROR_SUCCESS) err = e;
+    };
+    put(L"Bypass", s.bypass);
+    put(L"CleanupFilters", (s.hpfEnabled ? 1u : 0u) | (s.lpfEnabled ? 2u : 0u));
+    put(L"HpfEnabled", s.hpfEnabled);
+    put(L"HpfHz", s.hpfHz);
+    put(L"LpfHz", s.lpfHz);
+    put(L"NsEnabled", s.nsEnabled);
+    put(L"NsLevel", s.nsLevel);
+    put(L"GainMode", s.gainMode);
+    put(L"AgcEnabled", s.agcEnabled);
+    put(L"AgcHeadroomDb", static_cast<uint32_t>(s.agcHeadroomDb));
+    put(L"AgcMaxGainDb", static_cast<uint32_t>(s.agcMaxGainDb));
+    put(L"AgcSpeedDbPerSec", static_cast<uint32_t>(s.agcSpeedDbPerSec));
+    put(L"AgcNoiseCeilingDbfs", static_cast<uint32_t>(s.agcNoiseCeilingDbfs));
+    put(L"LimiterEnabled", s.limiterEnabled);
+    put(L"AecEnabled", s.aecEnabled);
+    put(L"AecStrength", s.aecStrength);
+    RegCloseKey(key);
+    return err;
+}
+
 namespace settings
 {
     void Publish(const Settings& s) noexcept

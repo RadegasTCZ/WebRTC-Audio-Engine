@@ -14,23 +14,33 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # --- Upstream WebRTC (AEC3, NS, AGC2, limiter), built from pinned sources (scripts/Fetch-Upstream.ps1)
 include(cmake/WebrtcUpstream.cmake)
 
+# --- Settings + log (shared by the audio effect and the settings app; no WebRTC)
+add_library(settings_core STATIC src/Settings.cpp src/Settings.h src/Log.cpp src/Log.h)
+target_compile_definitions(settings_core PUBLIC UNICODE _UNICODE NOMINMAX)
+target_compile_options(settings_core PRIVATE /W4 /guard:cf)
+target_link_libraries(settings_core PUBLIC advapi32 ole32)
+
 # --- Our processing core
 add_library(voice_core STATIC
   third_party/speexdsp/resample.c
   src/VoiceProcessor.cpp
   src/VoiceProcessor.h
-  src/Settings.cpp
-  src/Settings.h
   src/AgcStage.cpp
   src/AgcStage.h
-  src/Log.cpp
-  src/Log.h
+  src/AecConfig.h
+  src/ReferenceRing.h
 )
 target_include_directories(voice_core PUBLIC third_party/speexdsp)
 set_source_files_properties(third_party/speexdsp/resample.c PROPERTIES COMPILE_OPTIONS "/W0")
 target_compile_definitions(voice_core PUBLIC NOMINMAX _USE_MATH_DEFINES)
 target_compile_options(voice_core PRIVATE /W3 /guard:cf)
-target_link_libraries(voice_core PUBLIC webrtc_apm)
+target_link_libraries(voice_core PUBLIC webrtc_apm settings_core)
+
+# --- Settings app (a normal desktop app: it DOES get a manifest, unlike the APO DLL)
+add_executable(WebrtcAudioEngineSettings WIN32 app/SettingsApp.cpp app/SettingsApp.manifest)
+target_link_libraries(WebrtcAudioEngineSettings PRIVATE settings_core comctl32 shell32 user32 gdi32)
+target_compile_options(WebrtcAudioEngineSettings PRIVATE /W4 /permissive- /guard:cf)
+target_link_options(WebrtcAudioEngineSettings PRIVATE /guard:cf)
 
 add_library(WebrtcVoiceApo SHARED
   src/DllMain.cpp

@@ -31,6 +31,8 @@ struct Settings
     bool operator==(const Settings&) const = default;
 
     static Settings ReadFromRegistry() noexcept;  // missing values keep their defaults; clamps ranges
+    // Writes every value (the settings app). Returns a Win32 error code (ERROR_SUCCESS on success).
+    static LONG WriteToRegistry(const Settings& s) noexcept;
 };
 
 namespace settings
