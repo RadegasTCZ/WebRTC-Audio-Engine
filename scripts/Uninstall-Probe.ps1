@@ -60,12 +60,12 @@ try {
             Write-Host 'Disable_SysFx restored.'
         } catch { Write-Warning "Could not restore Disable_SysFx: $($_.Exception.Message)" }
     }
-    $classes = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Classes', $true)
+    # Full paths from HKLM: SOFTWARE\Classes itself can't be opened for writing.
+    $hklm = [Microsoft.Win32.Registry]::LocalMachine
     foreach ($c in @($ClsidMfx, $ClsidEfx)) {
-        $classes.DeleteSubKeyTree("CLSID\$c", $false)
-        $classes.DeleteSubKeyTree("AudioEngine\AudioProcessingObjects\$c", $false)
+        $hklm.DeleteSubKeyTree("SOFTWARE\Classes\CLSID\$c", $false)
+        $hklm.DeleteSubKeyTree("SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$c", $false)
     }
-    $classes.Close()
 }
 finally {
     $fx.Close(); $props.Close()

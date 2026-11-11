@@ -77,13 +77,15 @@ try {
     & icacls.exe $LogDir /grant '*S-1-5-19:(OI)(CI)M' '*S-1-15-2-1:(OI)(CI)M' '*S-1-1-0:(OI)(CI)M' | Out-Null
 
     # ---- 3. COM + APO registration
-    $classes = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey('SOFTWARE\Classes')
+    # Create by full path: HKLM\SOFTWARE\Classes itself refuses write-opens even for admins,
+    # while its CLSID and AudioEngine subkeys are writable.
+    $classes = [Microsoft.Win32.Registry]::LocalMachine
     foreach ($c in @(@($ClsidMfx, 'WebRTC Voice Probe (MFX)'), @($ClsidEfx, 'WebRTC Voice Probe (EFX)'))) {
-        $k = $classes.CreateSubKey("CLSID\$($c[0])"); $k.SetValue('', $c[1])
+        $k = $classes.CreateSubKey("SOFTWARE\Classes\CLSID\$($c[0])"); $k.SetValue('', $c[1])
         $ip = $k.CreateSubKey('InprocServer32'); $ip.SetValue('', $dll); $ip.SetValue('ThreadingModel', 'Both')
         $ip.Close(); $k.Close()
 
-        $a = $classes.CreateSubKey("AudioEngine\AudioProcessingObjects\$($c[0])")
+        $a = $classes.CreateSubKey("SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$($c[0])")
         $a.SetValue('FriendlyName', $c[1]);              $a.SetValue('Copyright', 'Copyright (c) RadegasTCZ')
         $a.SetValue('MajorVersion', 1, 'DWord');        $a.SetValue('MinorVersion', 0, 'DWord')
         $a.SetValue('Flags', 0x0E, 'DWord')               # APO_FLAG_DEFAULT
@@ -93,7 +95,6 @@ try {
         $a.SetValue('NumAPOInterfaces', 1, 'DWord');     $a.SetValue('APOInterface0', $ApoInterfaceIid)
         $a.Close()
     }
-    $classes.Close()
 
     # ---- 4. Append to the endpoint's composite lists
     foreach ($t in $targets) {
