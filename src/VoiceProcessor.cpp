@@ -186,15 +186,14 @@ void VoiceProcessor::Biquad::SetHighPass(float hz, float sampleRate) noexcept
 
 void VoiceProcessor::Biquad::SetLowPass(float hz, float sampleRate) noexcept
 {
-    // RBJ low-pass, Q = 1/sqrt(2) (2nd-order Butterworth, 12 dB/octave: a gentle top-end roll-off).
-    const double w0 = 2.0 * std::numbers::pi * hz / sampleRate;
-    const double cosw = std::cos(w0), alpha = std::sin(w0) / std::numbers::sqrt2;
-    const double a0 = 1.0 + alpha;
-    b0 = static_cast<float>((1.0 - cosw) / 2.0 / a0);
-    b1 = static_cast<float>((1.0 - cosw) / a0);
-    b2 = b0;
-    a1 = static_cast<float>(-2.0 * cosw / a0);
-    a2 = static_cast<float>((1.0 - alpha) / a0);
+    // 1st-order low-pass (6 dB/octave), bilinear transform with pre-warping: -3 dB exactly at `hz`.
+    // Deliberately gentle: it only takes the piercing edge off bright laptop mics.
+    const double k = std::tan(std::numbers::pi * hz / sampleRate);
+    b0 = static_cast<float>(k / (1.0 + k));
+    b1 = b0;
+    b2 = 0.0f;
+    a1 = static_cast<float>((k - 1.0) / (k + 1.0));
+    a2 = 0.0f;
 }
 
 float VoiceProcessor::Biquad::Run(float x) noexcept

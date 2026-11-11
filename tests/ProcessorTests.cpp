@@ -128,10 +128,10 @@ int main()
         EXPECT(cut > minCut && cut < maxCut, "%.0f Hz attenuation %.1f dB out of range", hz, cut);
     }
 
-    std::printf("[6b] hiss filter (12 kHz low-pass): 1 kHz passes, 18 kHz cut, gentle at 12 kHz (NS off)\n");
+    std::printf("[6b] hiss filter (10 kHz, 6 dB/oct): 1 kHz passes, -3 dB at 10 kHz, 18 kHz reduced (NS off)\n");
     {
         Settings lpOnly = def; lpOnly.nsEnabled = 0; lpOnly.hpfEnabled = 0; lpOnly.lpfEnabled = 1; lpOnly.limiterEnabled = 0;
-        for (auto [hz, lo, hi] : {std::tuple{1000.0f, -0.2, 0.2}, std::tuple{12000.0f, 2.0, 4.5}, std::tuple{18000.0f, 6.0, 99.0}})
+        for (auto [hz, lo, hi] : {std::tuple{1000.0f, -0.2, 0.3}, std::tuple{10000.0f, 2.0, 4.0}, std::tuple{18000.0f, 5.0, 99.0}})
         {
             auto s = Sine(frames, hz, 0.25f);
             auto o = Run(s, {480}, lpOnly);

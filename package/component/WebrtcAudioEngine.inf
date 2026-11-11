@@ -8,7 +8,7 @@ Signature   = "$WINDOWS NT$"
 Class       = AudioProcessingObject
 ClassGuid   = {5989fce8-9cd0-467d-8a6a-5419e31529d4}
 Provider    = %ProviderName%
-DriverVer   = 11/11/2026,0.10.0.0
+DriverVer   = 11/11/2026,0.10.1.0
 CatalogFile = WebrtcAudioEngine.cat
 PnpLockDown = 1
 
