@@ -7,6 +7,7 @@
 #include <atomic>
 #include "VoiceProcessor.h"
 #include "ReferenceRing.h"
+#include "Telemetry.h"
 
 // MFX = bit-exact probe; EFX = NS appended to the OEM endpoint chain; Pack = NS as our own effect pack.
 enum class ApoSlot { MFX, EFX, Pack };
@@ -122,6 +123,7 @@ private:
     std::atomic<uint64_t> m_refFrames{0}, m_refCalls{0}, m_refDropped{0}, m_refSilentCalls{0};
 
     HANDLE m_fxEvent = nullptr;   // from GetControllableSystemEffectsList (owned by the engine)
+    ::telemetry::Data* m_telemetry = nullptr;  // shared-memory meters for the tray app
 
     // Cached at LockForProcess (never changes while locked).
     UINT32 m_bytesPerFrame = 0;

@@ -1,6 +1,7 @@
 #include "ProbeApo.h"
 #include "Guids.h"
 #include "Log.h"
+#include "Telemetry.h"
 #include <functiondiscoverykeys_devpkey.h>
 #include <endpointvolume.h>
 #include <audiomediatype.h>
@@ -328,6 +329,8 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
             const UINT32 maxFrames = std::max(u32NumInputConnections ? ppInputConnections[0]->u32MaxFrameCount : 0u,
                                               u32NumOutputConnections ? ppOutputConnections[0]->u32MaxFrameCount : 0u);
             m_proc.SetReference(m_refActive.load() ? &m_ref : nullptr);  // echo reference attached by AddAuxiliaryInput
+            if (m_slot == ApoSlot::Pack && !m_telemetry)
+                m_telemetry = telemetry::OpenWriter();  // live meters for the tray app (non-RT here)
             ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(std::lround(fmt.fFramesPerSecond)), s,
                                 static_cast<int>(maxFrames ? maxFrames : 4096));
             apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f%s maxFrames=%u latency=%d frames",
@@ -392,6 +395,16 @@ STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CON
             std::memset(o, 0, static_cast<size_t>(frames) * m_bytesPerFrame);
             m_proc.Process(o, o, static_cast<int>(frames), cur, gainDb);
             ++m_silentCalls;
+        }
+        VoiceProcessor::Meters mt;
+        if (m_telemetry && m_proc.TakeMeters(mt))
+        {
+            telemetry::Data d{};
+            d.inputDbfs = mt.inputDbfs; d.outputDbfs = mt.outputDbfs; d.referenceDbfs = mt.referenceDbfs;
+            d.echoRemovedDb = mt.echoRemovedDb; d.agcGainDb = mt.agcGainDb; d.limiterDb = mt.limiterDb;
+            d.aecRunning = mt.aecRunning ? 1u : 0u;
+            d.sampleRate = static_cast<uint32_t>(m_proc.SampleRate());
+            telemetry::Publish(m_telemetry, d);
         }
         float peak = m_peak;
         const size_t n = static_cast<size_t>(frames) * m_channels;

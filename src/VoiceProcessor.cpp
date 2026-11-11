@@ -496,6 +496,31 @@ void VoiceProcessor::ProcessBlock() noexcept
         for (int i = 0; i < kBlock; ++i)
             c.out[i] = c.delayed[i] + m_wet.At(i) * (m_voice[i] - c.delayed[i]);
 
+    // Meters (every 10 blocks).
+    for (int i = 0; i < kBlock; ++i)
+    {
+        m_inSq += static_cast<double>(m_mono[i]) * m_mono[i];
+        m_outSq += static_cast<double>(m_voice[i]) * m_voice[i];
+        if (m_aec) m_refSq += static_cast<double>(m_ref[i]) * m_ref[i];
+    }
+    m_limPeakDb = std::max(m_limPeakDb, m_limiter->LastReductionDb());
+    if (++m_meterBlocks == 10)
+    {
+        constexpr double n = 10.0 * kBlock;
+        auto db = [](double sumSq) { return static_cast<float>(sumSq > 1e-12 * n ? 10.0 * std::log10(sumSq / n) : -120.0); };
+        m_meters.inputDbfs = db(m_inSq);
+        m_meters.outputDbfs = db(m_outSq);
+        m_meters.referenceDbfs = m_aec ? db(m_refSq) : -120.0f;
+        m_meters.aecRunning = m_aec != nullptr && m_settings.aecEnabled;
+        m_meters.echoRemovedDb = m_aec ? static_cast<float>(m_aec->controller->GetMetrics().echo_return_loss_enhancement) : 0.0f;
+        m_meters.agcGainDb = m_settings.agcEnabled ? m_agc->LastGainDb() : 0.0f;
+        m_meters.limiterDb = m_settings.limiterEnabled ? m_limPeakDb : 0.0f;
+        m_metersReady = true;
+        m_meterBlocks = 0;
+        m_inSq = m_outSq = m_refSq = 0;
+        m_limPeakDb = 0;
+    }
+
     if (m_nextLevel >= 0)
     {
         m_level = m_nextLevel;

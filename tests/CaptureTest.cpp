@@ -17,12 +17,29 @@
 #include <cmath>
 #include <cwchar>
 #include <initializer_list>
+#include "../src/Telemetry.h"
 
 #define CHECK(expr) do { HRESULT _hr = (expr); std::printf("%-48s hr=0x%08lX\n", #expr, static_cast<unsigned long>(_hr)); if (FAILED(_hr)) return 1; } while (0)
 
 int wmain(int argc, wchar_t** argv)
 {
     const wchar_t* modeArg = argc > 1 ? argv[1] : L"default";
+    if (wcscmp(modeArg, L"meters") == 0)
+    {
+        // Print the live meters the audio effect publishes (for the tray app), once per 200 ms.
+        const int count = argc > 2 ? _wtoi(argv[2]) * 5 : 25;
+        for (int i = 0; i < count; ++i)
+        {
+            telemetry::Data d{};
+            if (telemetry::Read(d))
+                std::printf("in %6.1f  out %6.1f  ref %6.1f dBFS | echo removed %5.1f dB  agc %+5.1f dB  limiter %4.1f dB | aec %u  %u Hz\n",
+                            d.inputDbfs, d.outputDbfs, d.referenceDbfs, d.echoRemovedDb, d.agcGainDb, d.limiterDb, d.aecRunning, d.sampleRate);
+            else
+                std::printf("(no live data)\n");
+            Sleep(200);
+        }
+        return 0;
+    }
     const int seconds = argc > 2 ? _wtoi(argv[2]) : 3;
     const bool comms = wcsstr(modeArg, L"comms") != nullptr;
     const bool raw = wcsstr(modeArg, L"raw") != nullptr;

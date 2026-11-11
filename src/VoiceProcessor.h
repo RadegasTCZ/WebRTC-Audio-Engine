@@ -65,6 +65,22 @@ public:
     float AgcGainDb() const noexcept { return m_agcGainDb.load(std::memory_order_relaxed); }
     float LimiterReductionDb() const noexcept { return m_limiterDb.load(std::memory_order_relaxed); }
 
+    // Live meters, refreshed every 10 blocks (100 ms). RT-safe: call after Process(); returns true once
+    // per refresh.
+    struct Meters
+    {
+        float inputDbfs = -120, outputDbfs = -120, referenceDbfs = -120;
+        float echoRemovedDb = 0, agcGainDb = 0, limiterDb = 0;
+        bool aecRunning = false;
+    };
+    bool TakeMeters(Meters& out) noexcept
+    {
+        if (!m_metersReady) return false;
+        out = m_meters;
+        m_metersReady = false;
+        return true;
+    }
+
     // Interleaved float32; in and out may alias. `s` applies at the next block boundary.
     // inputGainDb = mic volume slider gain; ignored (0 dB) while AGC2 is enabled.
     void Process(const float* in, float* out, int frames, const Settings& s, float inputGainDb = 0.0f) noexcept;
@@ -144,6 +160,12 @@ private:
     float m_gainTargetDb = 0.0f;
     Ramp m_gain{1.0f, 1.0f};
     std::atomic<float> m_agcGainDb{0.0f}, m_limiterDb{0.0f};
+
+    Meters m_meters{};
+    bool m_metersReady = false;
+    int m_meterBlocks = 0;
+    double m_inSq = 0, m_outSq = 0, m_refSq = 0;
+    float m_limPeakDb = 0;
 
     std::unique_ptr<Resampling> m_rs;   // null at 48 kHz
     int m_rate = 0;
