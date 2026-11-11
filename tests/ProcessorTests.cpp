@@ -330,7 +330,7 @@ int main()
 
     std::printf("[11] latency with and without AEC3 matches the reported %d samples (NS/HPF/AGC/limiter off)\n", kLat);
     {
-        Settings plain = def; plain.nsEnabled = 0; plain.hpfEnabled = 0; plain.limiterEnabled = 0;
+        Settings plain = def; plain.nsEnabled = 0; plain.hpfEnabled = 0; plain.lpfEnabled = 0; plain.limiterEnabled = 0;
         const int n = 48000;
         std::vector<float> mic(static_cast<size_t>(kCh) * n, 0.0f), farEnd(n, 0.0f);
         for (int f = 9600; f < n; f += 9600) for (int c = 0; c < kCh; ++c) mic[static_cast<size_t>(f) * kCh + c] = 0.5f;
