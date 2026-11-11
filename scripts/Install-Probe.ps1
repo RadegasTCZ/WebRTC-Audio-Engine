@@ -51,8 +51,10 @@ foreach ($t in $targets) {
     Write-Host "   now : $(if ($cur) { $cur -join ', ' } else { '(not set)' })"
     Write-Host "   new : $($new -join ', ')"
 }
-$sysfx = $props.GetValue($PKEY_DisableSysFx)
+# "Audio enhancements: Off" in Settings writes Disable_SysFx into FxProperties (verified on build 26300).
+$sysfx = $fx.GetValue($PKEY_DisableSysFx)
 Write-Host "Disable_SysFx on endpoint: $(if ($null -eq $sysfx) { '(not set)' } else { $sysfx })"
+if ($sysfx -eq 1) { Write-Warning 'Audio enhancements are OFF for this mic: our effect will not run. Choose "Device Default Effects" in Settings > Sound > (mic) > Audio enhancements.' }
 if ($DryRun) { Write-Host "`nDry run: nothing was changed."; return }
 
 # ---- 1. Backups

@@ -41,7 +41,7 @@ foreach ($p in $plans) {
     Write-Host "   now    : $(if ($p.Current) { $p.Current -join ', ' } else { '(not set)' })"
     Write-Host "   restore: $(if ($p.Target -and $p.Target[0]) { $p.Target -join ', ' } else { '(remove value)' })"
 }
-$sysfxNow = $props.GetValue($PKEY_DisableSysFx)
+$sysfxNow = $fx.GetValue($PKEY_DisableSysFx)   # lives in FxProperties (Settings > Audio enhancements: Off)
 $sysfxOrig = if ($orig) { $orig.DisableSysFx } else { $sysfxNow }
 Write-Host "Disable_SysFx: now=$(if ($null -eq $sysfxNow) {'(not set)'} else {$sysfxNow})  restore=$(if ($null -eq $sysfxOrig) {'(not set)'} else {$sysfxOrig})"
 Write-Host "Remove: COM + APO keys for $ClsidMfx, $ClsidEfx; NS settings HKLM\SOFTWARE\WebrtcVoiceApo; folder $InstallDir$(if ($RemoveLogs) { " and $LogDir" })"
@@ -55,8 +55,8 @@ try {
     }
     if ("$sysfxNow" -ne "$sysfxOrig") {
         try {
-            if ($null -eq $sysfxOrig) { $props.DeleteValue($PKEY_DisableSysFx, $false) }
-            else { $props.SetValue($PKEY_DisableSysFx, [int]$sysfxOrig, 'DWord') }
+            if ($null -eq $sysfxOrig) { $fx.DeleteValue($PKEY_DisableSysFx, $false) }
+            else { $fx.SetValue($PKEY_DisableSysFx, [int]$sysfxOrig, 'DWord') }
             Write-Host 'Disable_SysFx restored.'
         } catch { Write-Warning "Could not restore Disable_SysFx: $($_.Exception.Message)" }
     }
