@@ -444,6 +444,8 @@ float CProbeApo::SliderGainDb(const Settings& s) const noexcept
 {
     if (m_slot != ApoSlot::Pack)   // in the OEM chain the OEM applies the slider itself
         return 0.0f;
+    if (s.agcEnabled)              // AGC2 owns the level: the slider is ignored (owner's request)
+        return 0.0f;
     const bool apply = s.gainMode == 1 || (s.gainMode == 0 && !m_hardwareVolumeBus);
     return apply ? m_sliderDb.load(std::memory_order_relaxed) : 0.0f;
 }
