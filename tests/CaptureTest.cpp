@@ -9,10 +9,14 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <endpointvolume.h>
+#include <mmreg.h>
+#include <ks.h>
+#include <ksmedia.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <cstdio>
 #include <cmath>
 #include <cwchar>
+#include <initializer_list>
 
 #define CHECK(expr) do { HRESULT _hr = (expr); std::printf("%-48s hr=0x%08lX\n", #expr, static_cast<unsigned long>(_hr)); if (FAILED(_hr)) return 1; } while (0)
 
@@ -51,6 +55,36 @@ int wmain(int argc, wchar_t** argv)
 
     IAudioClient2* client = nullptr;
     CHECK(dev->Activate(__uuidof(IAudioClient2), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&client)));
+
+    if (wcscmp(modeArg, L"formats") == 0)
+    {
+        // Which hardware formats does the endpoint accept? (exclusive mode = what the driver supports)
+        std::printf("Exclusive-mode support (rate x bits x channels):\n");
+        for (DWORD rate : {8000u, 11025u, 16000u, 22050u, 32000u, 44100u, 48000u, 88200u, 96000u, 176400u, 192000u})
+        {
+            std::printf("  %6lu Hz:", rate);
+            for (WORD bits : {16, 24, 32})
+                for (WORD chans : {1, 2, 4})
+                {
+                    WAVEFORMATEXTENSIBLE w{};
+                    w.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+                    w.Format.nChannels = chans;
+                    w.Format.nSamplesPerSec = rate;
+                    w.Format.wBitsPerSample = bits == 24 ? 32 : bits;  // 24-bit usually in a 32-bit container
+                    w.Format.nBlockAlign = static_cast<WORD>(chans * w.Format.wBitsPerSample / 8);
+                    w.Format.nAvgBytesPerSec = rate * w.Format.nBlockAlign;
+                    w.Format.cbSize = 22;
+                    w.Samples.wValidBitsPerSample = bits;
+                    w.dwChannelMask = chans == 1 ? SPEAKER_FRONT_CENTER : chans == 2 ? (SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT) : 0;
+                    w.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+                    HRESULT hr = client->IsFormatSupported(AUDCLNT_SHAREMODE_EXCLUSIVE, &w.Format, nullptr);
+                    if (hr == S_OK) std::printf(" %ub/%uch", bits, chans);
+                }
+            std::printf("\n");
+        }
+        client->Release(); dev->Release(); en->Release();
+        return 0;
+    }
 
     AudioClientProperties props{};
     props.cbSize = sizeof(props);
