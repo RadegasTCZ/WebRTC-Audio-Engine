@@ -1,0 +1,4 @@
+LIBRARY WebrtcVoiceApo
+EXPORTS
+    DllGetClassObject   PRIVATE
+    DllCanUnloadNow     PRIVATE
