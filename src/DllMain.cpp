@@ -33,14 +33,17 @@ namespace
             if (!ppv)
                 return E_POINTER;
             *ppv = nullptr;
-            if (outer)
+            // The audio engine aggregates APOs. COM rule: an aggregated object may only be
+            // asked for IUnknown at creation time.
+            if (outer && riid != __uuidof(IUnknown))
                 return CLASS_E_NOAGGREGATION;
 
-            CProbeApo* apo = new (std::nothrow) CProbeApo(m_slot);
+            CProbeApo* apo = new (std::nothrow) CProbeApo(m_slot, outer);
             if (!apo)
                 return E_OUTOFMEMORY;
-            HRESULT hr = apo->QueryInterface(riid, ppv);
-            apo->Release();  // drop the constructor's reference
+            IUnknown* inner = apo->NonDelegatingUnknown();
+            HRESULT hr = inner->QueryInterface(riid, ppv);
+            inner->Release();  // drop the constructor's reference
             return hr;
         }
         STDMETHOD(LockServer)(BOOL lock) override

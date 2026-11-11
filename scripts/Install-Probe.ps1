@@ -74,7 +74,8 @@ try {
 
     New-Item -ItemType Directory -Force $LogDir | Out-Null
     # audiodg runs as LOCAL SERVICE (sometimes in a restricted/AppContainer-like token): let it append logs.
-    & icacls.exe $LogDir /grant '*S-1-5-19:(OI)(CI)M' '*S-1-15-2-1:(OI)(CI)M' '*S-1-1-0:(OI)(CI)M' | Out-Null
+    # S-1-15-2-2 = ALL RESTRICTED APPLICATION PACKAGES (less-privileged AppContainer tokens).
+    & icacls.exe $LogDir /grant '*S-1-5-19:(OI)(CI)M' '*S-1-15-2-1:(OI)(CI)M' '*S-1-15-2-2:(OI)(CI)M' '*S-1-1-0:(OI)(CI)M' | Out-Null
 
     # ---- 3. COM + APO registration
     # Create by full path: HKLM\SOFTWARE\Classes itself refuses write-opens even for admins,

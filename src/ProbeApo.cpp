@@ -36,16 +36,18 @@ namespace
     }
 }
 
-CProbeApo::CProbeApo(ApoSlot slot) noexcept
+CProbeApo::CProbeApo(ApoSlot slot, IUnknown* outer) noexcept
     : CBaseAudioProcessingObject(slot == ApoSlot::MFX ? &g_regMfx.m_Properties
                                                       : &g_regEfx.m_Properties),
       m_slot(slot),
       m_instanceId(++s_nextInstance)
 {
+    m_inner.self = this;
+    m_outer = outer ? outer : &m_inner;
     ++s_liveObjects;
     wchar_t exe[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    apolog::Write(L"[%s #%ld] created in host %s", SlotName(), m_instanceId, exe);
+    apolog::Write(L"[%s #%ld] created in host %s (aggregated=%d)", SlotName(), m_instanceId, exe, outer ? 1 : 0);
 }
 
 CProbeApo::~CProbeApo()
@@ -56,13 +58,23 @@ CProbeApo::~CProbeApo()
 
 // ---------------------------------------------------------------- IUnknown
 
-STDMETHODIMP CProbeApo::QueryInterface(REFIID riid, void** ppv)
+STDMETHODIMP CProbeApo::QueryInterface(REFIID riid, void** ppv) { return m_outer->QueryInterface(riid, ppv); }
+STDMETHODIMP_(ULONG) CProbeApo::AddRef() { return m_outer->AddRef(); }
+STDMETHODIMP_(ULONG) CProbeApo::Release() { return m_outer->Release(); }
+
+HRESULT CProbeApo::NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcept
 {
     if (!ppv)
         return E_POINTER;
     *ppv = nullptr;
 
-    if (riid == __uuidof(IUnknown) || riid == __uuidof(IAudioProcessingObject))
+    if (riid == __uuidof(IUnknown))
+    {
+        *ppv = &m_inner;  // identity of the inner object; refcount on the inner object
+        m_inner.AddRef();
+        return S_OK;
+    }
+    if (riid == __uuidof(IAudioProcessingObject))
         *ppv = static_cast<IAudioProcessingObject*>(this);
     else if (riid == __uuidof(IAudioProcessingObjectRT))
         *ppv = static_cast<IAudioProcessingObjectRT*>(this);
@@ -80,18 +92,8 @@ STDMETHODIMP CProbeApo::QueryInterface(REFIID riid, void** ppv)
         apolog::Write(L"[%s #%ld] QueryInterface for unsupported %s", SlotName(), m_instanceId, g);
         return E_NOINTERFACE;
     }
-    AddRef();
+    AddRef();  // goes to the outer object when aggregated (COM aggregation rule)
     return S_OK;
-}
-
-STDMETHODIMP_(ULONG) CProbeApo::AddRef() { return ++m_refs; }
-
-STDMETHODIMP_(ULONG) CProbeApo::Release()
-{
-    ULONG r = --m_refs;
-    if (r == 0)
-        delete this;
-    return r;
 }
 
 // ---------------------------------------------------------------- Initialize
@@ -149,6 +151,50 @@ STDMETHODIMP CProbeApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
 
     m_bIsInitialized = true;
     return S_OK;
+}
+
+// ---------------------------------------------------------------- Format negotiation (logged)
+
+namespace
+{
+    void DescribeFormat(IAudioMediaType* t, wchar_t (&out)[96]) noexcept
+    {
+        UNCOMPRESSEDAUDIOFORMAT f{};
+        if (!t)
+            wcscpy_s(out, L"(null)");
+        else if (FAILED(t->GetUncompressedAudioFormat(&f)))
+            wcscpy_s(out, L"(compressed/unknown)");
+        else
+            swprintf_s(out, L"%s %uch %ub/%ub %.0fHz",
+                       IsEqualGUID(f.guidFormatType, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ? L"float" : L"pcm",
+                       f.dwSamplesPerFrame, f.dwValidBitsPerSample, f.dwBytesPerSampleContainer * 8, f.fFramesPerSecond);
+    }
+}
+
+STDMETHODIMP CProbeApo::IsInputFormatSupported(IAudioMediaType* pOppositeFormat, IAudioMediaType* pRequestedInputFormat,
+                                               IAudioMediaType** ppSupportedInputFormat)
+{
+    HRESULT hr = CBaseAudioProcessingObject::IsInputFormatSupported(pOppositeFormat, pRequestedInputFormat, ppSupportedInputFormat);
+    wchar_t opp[96], req[96], sup[96];
+    DescribeFormat(pOppositeFormat, opp);
+    DescribeFormat(pRequestedInputFormat, req);
+    DescribeFormat(ppSupportedInputFormat ? *ppSupportedInputFormat : nullptr, sup);
+    apolog::Write(L"[%s #%ld] IsInputFormatSupported mode=%s req=[%s] opposite=[%s] -> hr=0x%08X supported=[%s]",
+                  SlotName(), m_instanceId, ModeName(m_mode), req, opp, hr, sup);
+    return hr;
+}
+
+STDMETHODIMP CProbeApo::IsOutputFormatSupported(IAudioMediaType* pOppositeFormat, IAudioMediaType* pRequestedOutputFormat,
+                                                IAudioMediaType** ppSupportedOutputFormat)
+{
+    HRESULT hr = CBaseAudioProcessingObject::IsOutputFormatSupported(pOppositeFormat, pRequestedOutputFormat, ppSupportedOutputFormat);
+    wchar_t opp[96], req[96], sup[96];
+    DescribeFormat(pOppositeFormat, opp);
+    DescribeFormat(pRequestedOutputFormat, req);
+    DescribeFormat(ppSupportedOutputFormat ? *ppSupportedOutputFormat : nullptr, sup);
+    apolog::Write(L"[%s #%ld] IsOutputFormatSupported mode=%s req=[%s] opposite=[%s] -> hr=0x%08X supported=[%s]",
+                  SlotName(), m_instanceId, ModeName(m_mode), req, opp, hr, sup);
+    return hr;
 }
 
 // ---------------------------------------------------------------- Lock / Unlock

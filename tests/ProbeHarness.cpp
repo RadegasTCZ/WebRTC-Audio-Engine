@@ -21,15 +21,41 @@ static int Fail(const char* what, HRESULT hr)
     return 1;
 }
 
-static int RunOne(GetClassObjectFn getClassObject, REFCLSID clsid, const char* name, UINT32 period)
+// Minimal aggregating outer object, like the audio engine's wrapper around an APO.
+struct FakeOuter final : IUnknown
 {
-    std::printf("--- %s, period %u frames\n", name, period);
+    IUnknown* inner = nullptr;
+    ULONG refs = 1;
+    STDMETHOD(QueryInterface)(REFIID riid, void** ppv) override
+    {
+        if (riid == __uuidof(IUnknown)) { *ppv = this; AddRef(); return S_OK; }
+        return inner->QueryInterface(riid, ppv);
+    }
+    STDMETHOD_(ULONG, AddRef)() override { return ++refs; }
+    STDMETHOD_(ULONG, Release)() override { return --refs; }  // lives on the stack
+};
+
+static int RunOne(GetClassObjectFn getClassObject, REFCLSID clsid, const char* name, UINT32 period, bool aggregated)
+{
+    std::printf("--- %s, period %u frames, %s\n", name, period, aggregated ? "AGGREGATED (like audiodg)" : "standalone");
     IClassFactory* factory = nullptr;
     HRESULT hr = getClassObject(clsid, __uuidof(IClassFactory), reinterpret_cast<void**>(&factory));
     if (FAILED(hr)) return Fail("DllGetClassObject", hr);
 
+    FakeOuter outer;
     IAudioProcessingObject* apo = nullptr;
-    hr = factory->CreateInstance(nullptr, __uuidof(IAudioProcessingObject), reinterpret_cast<void**>(&apo));
+    if (aggregated)
+    {
+        void* bad = nullptr;
+        if (factory->CreateInstance(&outer, __uuidof(IAudioProcessingObject), &bad) != CLASS_E_NOAGGREGATION)
+            return Fail("aggregated create with non-IUnknown IID should be refused", E_FAIL);
+        hr = factory->CreateInstance(&outer, __uuidof(IUnknown), reinterpret_cast<void**>(&outer.inner));
+        if (SUCCEEDED(hr)) hr = outer.QueryInterface(__uuidof(IAudioProcessingObject), reinterpret_cast<void**>(&apo));
+    }
+    else
+    {
+        hr = factory->CreateInstance(nullptr, __uuidof(IAudioProcessingObject), reinterpret_cast<void**>(&apo));
+    }
     factory->Release();
     if (FAILED(hr)) return Fail("CreateInstance", hr);
 
@@ -113,6 +139,11 @@ static int RunOne(GetClassObjectFn getClassObject, REFCLSID clsid, const char* n
 
     fx2->Release(); rt->Release(); cfg->Release(); mediaType->Release();
     ULONG left = apo->Release();
+    if (aggregated)
+    {
+        if (outer.refs != 1) return Fail("outer refcount not balanced", E_FAIL);
+        left = outer.inner->Release();  // the engine releases the inner object last
+    }
     std::printf("OK: %u blocks passed through bit-exact, final refcount %lu\n", blocks + 2, left);
     return left == 0 ? 0 : Fail("refcount leak", E_FAIL);
 }
@@ -127,11 +158,12 @@ int wmain(int argc, wchar_t** argv)
     if (!getClassObject) return Fail("GetProcAddress DllGetClassObject", E_FAIL);
 
     int rc = 0;
-    for (UINT32 period : {480u, 441u, 128u})
-    {
-        rc |= RunOne(getClassObject, CLSID_WebrtcVoiceApoMFX, "MFX", period);
-        rc |= RunOne(getClassObject, CLSID_WebrtcVoiceApoEFX, "EFX", period);
-    }
+    for (bool aggregated : {true, false})
+        for (UINT32 period : {480u, 441u, 128u})
+        {
+            rc |= RunOne(getClassObject, CLSID_WebrtcVoiceApoMFX, "MFX", period, aggregated);
+            rc |= RunOne(getClassObject, CLSID_WebrtcVoiceApoEFX, "EFX", period, aggregated);
+        }
     using CanUnloadFn = HRESULT(STDAPICALLTYPE*)();
     auto canUnload = reinterpret_cast<CanUnloadFn>(GetProcAddress(dll, "DllCanUnloadNow"));
     std::printf("DllCanUnloadNow -> %s\n", canUnload && canUnload() == S_OK ? "S_OK" : "S_FALSE (objects alive!)");

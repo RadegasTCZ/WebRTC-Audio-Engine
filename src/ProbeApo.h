@@ -13,15 +13,24 @@ enum class ApoSlot { MFX, EFX };
 class CProbeApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects2
 {
 public:
-    explicit CProbeApo(ApoSlot slot) noexcept;
+    // The audio engine creates APOs AGGREGATED (pUnkOuter != null), so we implement the
+    // standard COM aggregation pattern: an inner non-delegating IUnknown that owns the
+    // lifetime, while the IUnknown methods on our interfaces delegate to the outer object.
+    CProbeApo(ApoSlot slot, IUnknown* outer) noexcept;
+    IUnknown* NonDelegatingUnknown() noexcept { return &m_inner; }
 
-    // IUnknown
+    // IUnknown (delegating)
     STDMETHOD(QueryInterface)(REFIID riid, void** ppv) override;
     STDMETHOD_(ULONG, AddRef)() override;
     STDMETHOD_(ULONG, Release)() override;
 
     // IAudioProcessingObject
     STDMETHOD(Initialize)(UINT32 cbDataSize, BYTE* pbyData) override;
+
+    STDMETHOD(IsInputFormatSupported)(IAudioMediaType* pOppositeFormat, IAudioMediaType* pRequestedInputFormat,
+                                      IAudioMediaType** ppSupportedInputFormat) override;
+    STDMETHOD(IsOutputFormatSupported)(IAudioMediaType* pOppositeFormat, IAudioMediaType* pRequestedOutputFormat,
+                                       IAudioMediaType** ppSupportedOutputFormat) override;
 
     // IAudioProcessingObjectRT
     STDMETHOD_(void, APOProcess)(UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** ppInputConnections,
@@ -38,10 +47,27 @@ public:
     static long LiveObjects() noexcept { return s_liveObjects.load(); }
 
 private:
+    struct InnerUnknown final : IUnknown
+    {
+        CProbeApo* self;
+        STDMETHOD(QueryInterface)(REFIID riid, void** ppv) override { return self->NonDelegatingQueryInterface(riid, ppv); }
+        STDMETHOD_(ULONG, AddRef)() override { return ++self->m_refs; }
+        STDMETHOD_(ULONG, Release)() override
+        {
+            ULONG r = --self->m_refs;
+            if (r == 0)
+                delete self;
+            return r;
+        }
+    };
+
     ~CProbeApo() override;
+    HRESULT NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcept;
     const wchar_t* SlotName() const noexcept { return m_slot == ApoSlot::MFX ? L"MFX" : L"EFX"; }
     void ResetStats() noexcept;
 
+    InnerUnknown m_inner;
+    IUnknown* m_outer;  // the aggregating object, or &m_inner when not aggregated
     std::atomic<ULONG> m_refs{1};
     const ApoSlot m_slot;
     const long m_instanceId;

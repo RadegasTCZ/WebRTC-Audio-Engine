@@ -38,3 +38,8 @@ add_executable(ProbeHarness tests/ProbeHarness.cpp)
 target_compile_definitions(ProbeHarness PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(ProbeHarness PRIVATE audiomediatypecrt ole32 uuid)
 add_dependencies(ProbeHarness WebrtcVoiceApo)
+
+# Opens the mic through WASAPI in a chosen category / RAW mode and reports errors + level.
+add_executable(CaptureTest tests/CaptureTest.cpp)
+target_compile_definitions(CaptureTest PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(CaptureTest PRIVATE ole32 uuid)
