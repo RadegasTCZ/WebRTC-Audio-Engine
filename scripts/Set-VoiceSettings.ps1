@@ -5,7 +5,8 @@
 .EXAMPLE
   .\Set-VoiceSettings.ps1                          # show current settings
   .\Set-VoiceSettings.ps1 -Bypass on               # untouched audio (same delay, volume slider kept)
-  .\Set-VoiceSettings.ps1 -Hpf off -HpfHz 100
+  .\Set-VoiceSettings.ps1 -Cleanup both            # off | rumble (80 Hz high-pass) | hiss (12 kHz low-pass) | both
+  .\Set-VoiceSettings.ps1 -HpfHz 100 -LpfHz 11000
   .\Set-VoiceSettings.ps1 -Ns on -NsLevel 18       # 6, 12, 18 or 21 dB
   .\Set-VoiceSettings.ps1 -AgcPreset normal        # gentle | normal | strong (also switches AGC on)
   .\Set-VoiceSettings.ps1 -Agc off
@@ -15,7 +16,8 @@
 #>
 param(
     [ValidateSet('on', 'off')][string]$Bypass,
-    [ValidateSet('on', 'off')][string]$Hpf,
+    [ValidateSet('off', 'rumble', 'hiss', 'both')][string]$Cleanup,
+    [ValidateRange(8000, 16000)][int]$LpfHz,
     [ValidateRange(20, 300)][int]$HpfHz,
     [ValidateSet('on', 'off')][string]$Ns,
     [ValidateSet(6, 12, 18, 21)][int]$NsLevel,
@@ -50,7 +52,8 @@ if (-not $k) {
 }
 $dw = { param($name, $val) $k.SetValue($name, [int]$val, 'DWord') }
 if ($PSBoundParameters.ContainsKey('Bypass'))  { & $dw 'Bypass' (& $onOff $Bypass) }
-if ($PSBoundParameters.ContainsKey('Hpf'))     { & $dw 'HpfEnabled' (& $onOff $Hpf) }
+if ($Cleanup) { & $dw 'CleanupFilters' ([array]::IndexOf(@('off', 'rumble', 'hiss', 'both'), $Cleanup)) }
+if ($PSBoundParameters.ContainsKey('LpfHz')) { & $dw 'LpfHz' $LpfHz }
 if ($PSBoundParameters.ContainsKey('HpfHz'))   { & $dw 'HpfHz' $HpfHz }
 if ($PSBoundParameters.ContainsKey('Ns'))      { & $dw 'NsEnabled' (& $onOff $Ns) }
 if ($PSBoundParameters.ContainsKey('NsLevel')) { & $dw 'NsLevel' ([array]::IndexOf(@(6, 12, 18, 21), $NsLevel)) }
@@ -73,9 +76,11 @@ $get = { param($n, $d) $v = $k.GetValue($n); if ($null -eq $v) { $d } else { [in
 $st = { param($v) if ($v) { 'on' } else { 'off' } }
 $cur = @((& $get 'AgcHeadroomDb' 5), (& $get 'AgcMaxGainDb' 30), (& $get 'AgcSpeedDbPerSec' 6), (& $get 'AgcNoiseCeilingDbfs' -50))
 $presetName = ($presets.Keys | Where-Object { (Compare-Object $presets[$_] $cur) -eq $null } | Select-Object -First 1) ?? 'custom'
-Write-Host ("Bypass {0} | AEC {13} ({14}) | HPF {1} @ {2} Hz | NS {3} @ {4} dB | AGC {5} ({6}: headroom {7}, max {8}, speed {9}, noise {10}) | Limiter {11} | Slider gain {12}" -f `
-    (& $st (& $get 'Bypass' 0)), (& $st (& $get 'HpfEnabled' 1)), (& $get 'HpfHz' 80), (& $st (& $get 'NsEnabled' 1)),
+$cl = & $get 'CleanupFilters' -1; if ($cl -lt 0) { $cl = (& $get 'HpfEnabled' 1) }
+Write-Host ("Bypass {0} | AEC {13} ({14}) | Cleanup {15} (rumble {2} Hz, hiss {16} Hz) | NS {3} @ {4} dB | AGC {5} ({6}: headroom {7}, max {8}, speed {9}, noise {10}) | Limiter {11} | Slider gain {12}" -f `
+    (& $st (& $get 'Bypass' 0)), '', (& $get 'HpfHz' 80), (& $st (& $get 'NsEnabled' 1)),
     @(6, 12, 18, 21)[(& $get 'NsLevel' 1)], (& $st (& $get 'AgcEnabled' 0)), $presetName, $cur[0], $cur[1], $cur[2], $cur[3],
     (& $st (& $get 'LimiterEnabled' 1)), @('auto', 'always', 'never')[(& $get 'GainMode' 0)],
-    (& $st (& $get 'AecEnabled' 1)), @('gentle', 'normal', 'strong')[(& $get 'AecStrength' 1)])
+    (& $st (& $get 'AecEnabled' 1)), @('gentle', 'normal', 'strong')[(& $get 'AecStrength' 1)],
+    @('off', 'rumble', 'hiss', 'both')[$cl], (& $get 'LpfHz' 12000))
 $k.Close()

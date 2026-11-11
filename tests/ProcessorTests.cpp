@@ -128,10 +128,24 @@ int main()
         EXPECT(cut > minCut && cut < maxCut, "%.0f Hz attenuation %.1f dB out of range", hz, cut);
     }
 
+    std::printf("[6b] hiss filter (12 kHz low-pass): 1 kHz passes, 18 kHz cut, gentle at 12 kHz (NS off)\n");
+    {
+        Settings lpOnly = def; lpOnly.nsEnabled = 0; lpOnly.hpfEnabled = 0; lpOnly.lpfEnabled = 1; lpOnly.limiterEnabled = 0;
+        for (auto [hz, lo, hi] : {std::tuple{1000.0f, -0.2, 0.2}, std::tuple{12000.0f, 2.0, 4.5}, std::tuple{18000.0f, 6.0, 99.0}})
+        {
+            auto s = Sine(frames, hz, 0.25f);
+            auto o = Run(s, {480}, lpOnly);
+            const double cut = RmsDb(s, half, s.size()) - RmsDb(o, half, s.size());
+            std::printf("    %5.0f Hz: %.1f dB attenuation\n", hz, cut);
+            EXPECT(cut > lo && cut < hi, "%.0f Hz attenuation %.1f dB out of range", hz, cut);
+        }
+    }
+
     std::printf("[7] live switching (every stage, every level, bypass) stays finite and click-free\n");
     auto tone = Sine(frames, 1000.0f, 0.25f);
     auto sw = Run(tone, {441}, def, false, [](int k, Settings& s) {
         s.hpfEnabled = (k / 7) % 2;
+        s.lpfEnabled = (k / 5) % 2;
         s.nsEnabled = (k / 11) % 2;
         s.nsLevel = (k / 13) % 4;
         s.bypass = (k / 17) % 2;

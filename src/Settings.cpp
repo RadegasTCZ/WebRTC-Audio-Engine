@@ -35,8 +35,8 @@ namespace
         settings::Publish(s);
         if (!(s == old))
         {
-            apolog::Write(L"[settings] bypass=%u hpf=%u@%uHz ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u aec=%u strength=%u",
-                          s.bypass, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel, s.gainMode, s.agcEnabled, s.agcHeadroomDb,
+            apolog::Write(L"[settings] bypass=%u lpf=%u@%uHz hpf=%u@%uHz ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u aec=%u strength=%u",
+                          s.bypass, s.lpfEnabled, s.lpfHz, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel, s.gainMode, s.agcEnabled, s.agcHeadroomDb,
                           s.agcMaxGainDb, s.agcSpeedDbPerSec, s.agcNoiseCeilingDbfs, s.limiterEnabled, s.aecEnabled, s.aecStrength);
             if (auto hook = g_hook.load())
                 hook(s);
@@ -54,8 +54,17 @@ Settings Settings::ReadFromRegistry() noexcept
             value = v;
     };
     read(L"Bypass", s.bypass);
-    read(L"HpfEnabled", s.hpfEnabled);
+    read(L"HpfEnabled", s.hpfEnabled);   // older key; CleanupFilters below wins when present
     read(L"HpfHz", s.hpfHz);
+    uint32_t cleanup = 0xFFFFFFFFu;
+    read(L"CleanupFilters", cleanup);
+    if (cleanup <= 3)
+    {
+        s.hpfEnabled = (cleanup & 1u) ? 1u : 0u;
+        s.lpfEnabled = (cleanup & 2u) ? 1u : 0u;
+    }
+    read(L"LpfHz", s.lpfHz);
+    s.lpfHz = std::clamp<uint32_t>(s.lpfHz, 8000, 16000);
     read(L"NsEnabled", s.nsEnabled);
     read(L"NsLevel", s.nsLevel);
     read(L"GainMode", s.gainMode);

@@ -9,8 +9,11 @@
 struct Settings
 {
     uint32_t bypass = 0;        // 1 = whole chain bypassed (latency kept constant)
-    uint32_t hpfEnabled = 1;    // high-pass filter, first in the chain
+    // Cleanup filters (registry "CleanupFilters": 0 = off, 1 = rumble, 2 = hiss, 3 = both), first in the chain.
+    uint32_t hpfEnabled = 1;    // "rumble": high-pass, 2nd-order Butterworth
     uint32_t hpfHz = 80;        // 20..300
+    uint32_t lpfEnabled = 0;    // "hiss": gentle low-pass, 2nd-order Butterworth (tames harsh highs / hiss)
+    uint32_t lpfHz = 12000;     // 8000..16000
     uint32_t nsEnabled = 1;     // WebRTC noise suppression
     uint32_t nsLevel = 1;       // 0 = 6 dB, 1 = 12 dB, 2 = 18 dB, 3 = 21 dB
     uint32_t gainMode = 0;      // mic volume slider in software (effect pack only):

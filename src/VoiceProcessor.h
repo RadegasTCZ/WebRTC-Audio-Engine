@@ -82,6 +82,7 @@ private:
     {
         float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
         void SetHighPass(float hz, float sampleRate) noexcept;
+        void SetLowPass(float hz, float sampleRate) noexcept;
         float Run(float x) noexcept;
     };
     struct Ramp
@@ -117,7 +118,7 @@ private:
     std::vector<Channel> m_ch;
 
     // Mono voice path.
-    Biquad m_hpf;
+    Biquad m_hpf, m_lpf;
     std::unique_ptr<webrtc::AudioBuffer> m_cap, m_render;
     std::array<std::unique_ptr<webrtc::AudioBuffer>, kNsLevels> m_nsBuf;
     std::array<std::unique_ptr<webrtc::NoiseSuppressor>, kNsLevels> m_ns;
@@ -137,9 +138,9 @@ private:
     std::unique_ptr<OutputLimiter> m_limiter;
 
     Settings m_settings{};
-    uint32_t m_hpfHzApplied = 0;
+    uint32_t m_hpfHzApplied = 0, m_lpfHzApplied = 0;
     int m_level = 1, m_nextLevel = -1;
-    Ramp m_hpfMix, m_nsMix, m_agcMix, m_limMix, m_wet;
+    Ramp m_hpfMix, m_lpfMix, m_nsMix, m_agcMix, m_limMix, m_wet;
     float m_gainTargetDb = 0.0f;
     Ramp m_gain{1.0f, 1.0f};
     std::atomic<float> m_agcGainDb{0.0f}, m_limiterDb{0.0f};
