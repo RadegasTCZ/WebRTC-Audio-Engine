@@ -3,6 +3,7 @@
 #include "Log.h"
 #include <functiondiscoverykeys_devpkey.h>
 #include <endpointvolume.h>
+#include <audiomediatype.h>
 #include <string>
 #include <cwctype>
 #include <ksmedia.h>
@@ -92,6 +93,12 @@ HRESULT CProbeApo::NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcept
         *ppv = static_cast<IAudioSystemEffects*>(this);
     else if (riid == __uuidof(IAudioSystemEffects2))
         *ppv = static_cast<IAudioSystemEffects2*>(this);
+    else if ((riid == __uuidof(IApoAcousticEchoCancellation) || riid == __uuidof(IApoAcousticEchoCancellation2)) && IsAecCandidate())
+        *ppv = static_cast<IApoAcousticEchoCancellation2*>(this);
+    else if (riid == __uuidof(IApoAuxiliaryInputConfiguration) && IsAecCandidate())
+        *ppv = static_cast<IApoAuxiliaryInputConfiguration*>(this);
+    else if (riid == __uuidof(IApoAuxiliaryInputRT) && IsAecCandidate())
+        *ppv = static_cast<IApoAuxiliaryInputRT*>(this);
     else if (riid == __uuidof(IAudioSystemEffects3) && m_slot == ApoSlot::Pack)
         *ppv = static_cast<IAudioSystemEffects3*>(this);
     else if (riid == __uuidof(IAudioProcessingObjectNotifications) && m_slot == ApoSlot::Pack)
@@ -318,6 +325,7 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
         {
             const UINT32 maxFrames = std::max(u32NumInputConnections ? ppInputConnections[0]->u32MaxFrameCount : 0u,
                                               u32NumOutputConnections ? ppOutputConnections[0]->u32MaxFrameCount : 0u);
+            m_proc.SetReference(m_refActive.load() ? &m_ref : nullptr);  // echo reference attached by AddAuxiliaryInput
             ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(std::lround(fmt.fFramesPerSecond)), s,
                                 static_cast<int>(maxFrames ? maxFrames : 4096));
             apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f%s maxFrames=%u latency=%d frames",
@@ -341,6 +349,10 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
 STDMETHODIMP CProbeApo::UnlockForProcess()
 {
     const double seconds = (GetTickCount64() - m_lockTick) / 1000.0;
+    if (m_refActive.load())
+        apolog::Write(L"[%s #%ld] echo reference: calls=%llu frames=%llu (%.1f s) silentCalls=%llu dropped=%llu, AEC3 %s, reference underruns=%llu", SlotName(),
+                      m_instanceId, m_refCalls.load(), m_refFrames.load(), m_refFrames.load() / 48000.0, m_refSilentCalls.load(), m_refDropped.load(),
+                      m_proc.HasAec() ? L"running" : L"not running", m_proc.ReferenceUnderruns());
     const double peakDb = m_peak > 0.0f ? 20.0 * std::log10(static_cast<double>(m_peak)) : -999.0;
     apolog::Write(L"[%s #%ld] UnlockForProcess mode=%s after %.1f s: calls=%llu validFrames=%llu silentCalls=%llu period=%u..%u frames peak=%.1f dBFS underruns=%llu",
                   SlotName(), m_instanceId, ModeName(m_mode), seconds, m_processCalls, m_validFrames, m_silentCalls,
@@ -420,6 +432,137 @@ STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CON
 
     out->u32ValidFrameCount = frames;
     out->u32BufferFlags = in->u32BufferFlags;
+}
+
+// ---------------------------------------------------------------- Echo reference (auxiliary input)
+
+namespace
+{
+    constexpr GUID kModeCommunications = {0x98951333, 0xB9CD, 0x48B1, {0xA0, 0xA3, 0xFF, 0x40, 0x68, 0x2D, 0x73, 0xF7}};
+}
+
+bool CProbeApo::IsAecCandidate() const noexcept
+{
+    // An AEC APO must be a capture mode effect; the AecApo sample only accepts COMMUNICATIONS mode.
+    return m_slot == ApoSlot::Pack && IsEqualGUID(m_mode, kModeCommunications);
+}
+
+STDMETHODIMP CProbeApo::GetDesiredReferenceStreamProperties(APO_REFERENCE_STREAM_PROPERTIES* pProperties)
+{
+    if (!pProperties)
+        return E_POINTER;
+    // Post-volume loopback: the reference has the speaker volume applied, like the real echo.
+    *pProperties = APO_REFERENCE_STREAM_PROPERTIES_POST_VOLUME_LOOPBACK;
+    apolog::Write(L"[%s #%ld] GetDesiredReferenceStreamProperties -> POST_VOLUME_LOOPBACK", SlotName(), m_instanceId);
+    return S_OK;
+}
+
+STDMETHODIMP CProbeApo::IsInputFormatSupported(IAudioMediaType* pRequested, IAudioMediaType** ppSupported)
+{
+    // Aux (reference) input: we want 48 kHz float32, any channel count (we downmix to mono).
+    if (!pRequested || !ppSupported)
+        return E_POINTER;
+    *ppSupported = nullptr;
+    UNCOMPRESSEDAUDIOFORMAT f{};
+    HRESULT hr = pRequested->GetUncompressedAudioFormat(&f);
+    if (FAILED(hr))
+        return hr;
+    const bool ok = IsEqualGUID(f.guidFormatType, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) && f.dwBytesPerSampleContainer == 4 &&
+                    std::lround(f.fFramesPerSecond) == VoiceProcessor::kSampleRate && f.dwSamplesPerFrame >= 1;
+    if (ok)
+    {
+        pRequested->AddRef();
+        *ppSupported = pRequested;
+        hr = S_OK;
+    }
+    else
+    {
+        UNCOMPRESSEDAUDIOFORMAT want = f;
+        want.guidFormatType = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+        want.dwBytesPerSampleContainer = 4;
+        want.dwValidBitsPerSample = 32;
+        want.fFramesPerSecond = static_cast<float>(VoiceProcessor::kSampleRate);
+        if (want.dwSamplesPerFrame < 1) want.dwSamplesPerFrame = 2;
+        hr = CreateAudioMediaTypeFromUncompressedAudioFormat(&want, ppSupported);
+        if (SUCCEEDED(hr))
+            hr = S_FALSE;  // "not that one, but this one"
+    }
+    apolog::Write(L"[%s #%ld] aux IsInputFormatSupported req=%s %uch %.0fHz -> 0x%08X", SlotName(), m_instanceId,
+                  IsEqualGUID(f.guidFormatType, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ? L"float" : L"pcm", f.dwSamplesPerFrame,
+                  f.fFramesPerSecond, hr);
+    return hr;
+}
+
+STDMETHODIMP CProbeApo::AddAuxiliaryInput(DWORD dwInputId, UINT32 cbDataSize, BYTE* pbyData, APO_CONNECTION_DESCRIPTOR* pInputConnection)
+{
+    if (!pInputConnection || !pInputConnection->pFormat)
+        return E_INVALIDARG;
+    if (m_refActive.load())
+        return E_FAIL;  // one reference only
+    UNCOMPRESSEDAUDIOFORMAT f{};
+    pInputConnection->pFormat->GetUncompressedAudioFormat(&f);
+    m_refChannels = f.dwSamplesPerFrame;
+    m_refRate = f.fFramesPerSecond;
+    m_refFloat = IsEqualGUID(f.guidFormatType, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) && f.dwBytesPerSampleContainer == 4;
+    APO_REFERENCE_STREAM_PROPERTIES props = APO_REFERENCE_STREAM_PROPERTIES_NONE;
+    if (pbyData && cbDataSize == sizeof(AcousticEchoCanceller_Reference_Input))
+        props = reinterpret_cast<const AcousticEchoCanceller_Reference_Input*>(pbyData)->streamProperties;
+    if (!m_refFloat || std::lround(m_refRate) != VoiceProcessor::kSampleRate || m_refChannels < 1)
+    {
+        apolog::Write(L"[%s #%ld] AddAuxiliaryInput id=%lu REJECTED format %s %uch %.0fHz", SlotName(), m_instanceId, dwInputId,
+                      m_refFloat ? L"float" : L"non-float", m_refChannels, m_refRate);
+        return E_INVALIDARG;
+    }
+    m_ref.Init(VoiceProcessor::kSampleRate);  // 1 s of mono reference
+    m_refInputId = dwInputId;
+    m_refFrames = m_refCalls = m_refDropped = m_refSilentCalls = 0;
+    m_refActive.store(true);
+    apolog::Write(L"[%s #%ld] AddAuxiliaryInput id=%lu cb=%u (%s) props=0x%X format float %uch %.0fHz maxFrames=%u",
+                  SlotName(), m_instanceId, dwInputId, cbDataSize,
+                  cbDataSize == sizeof(AcousticEchoCanceller_Reference_Input) ? L"AEC reference input" : L"other",
+                  props, m_refChannels, m_refRate, pInputConnection->u32MaxFrameCount);
+    return S_OK;
+}
+
+STDMETHODIMP CProbeApo::RemoveAuxiliaryInput(DWORD dwInputId)
+{
+    if (!m_refActive.load() || dwInputId != m_refInputId)
+        return E_INVALIDARG;
+    m_refActive.store(false);
+    apolog::Write(L"[%s #%ld] RemoveAuxiliaryInput id=%lu after calls=%llu frames=%llu silent=%llu dropped=%llu", SlotName(),
+                  m_instanceId, dwInputId, m_refCalls.load(), m_refFrames.load(), m_refSilentCalls.load(), m_refDropped.load());
+    return S_OK;
+}
+
+STDMETHODIMP_(void) CProbeApo::AcceptInput(DWORD dwInputId, const APO_CONNECTION_PROPERTY* p)
+{
+    // Real-time: no allocation, no locks, no logging.
+    if (!p || !m_refActive.load(std::memory_order_acquire) || dwInputId != m_refInputId)
+        return;
+    m_refCalls.fetch_add(1, std::memory_order_relaxed);
+    const UINT32 frames = p->u32ValidFrameCount;
+    float mono[1024];
+    const float* src = reinterpret_cast<const float*>(p->pBuffer);
+    const bool silent = p->u32BufferFlags != BUFFER_VALID || !src;
+    if (silent)
+        m_refSilentCalls.fetch_add(1, std::memory_order_relaxed);
+    const float inv = 1.0f / static_cast<float>(m_refChannels);
+    for (UINT32 done = 0; done < frames;)
+    {
+        const UINT32 n = std::min<UINT32>(frames - done, 1024);
+        for (UINT32 i = 0; i < n; ++i)
+        {
+            float acc = 0.0f;
+            if (!silent)
+                for (UINT32 c = 0; c < m_refChannels; ++c)
+                    acc += src[(static_cast<size_t>(done) + i) * m_refChannels + c];
+            mono[i] = acc * inv;
+        }
+        const size_t written = m_ref.Write(mono, n);
+        m_refDropped.fetch_add(n - written, std::memory_order_relaxed);
+        done += n;
+    }
+    m_refFrames.fetch_add(frames, std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------- IAudioSystemEffects3

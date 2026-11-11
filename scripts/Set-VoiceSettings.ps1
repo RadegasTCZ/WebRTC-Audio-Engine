@@ -26,7 +26,9 @@ param(
     [ValidateRange(1, 30)][int]$AgcSpeed,
     [ValidateRange(-80, -20)][int]$AgcNoiseCeiling,
     [ValidateSet('on', 'off')][string]$Limiter,
-    [ValidateSet('auto', 'always', 'never')][string]$GainMode
+    [ValidateSet('auto', 'always', 'never')][string]$GainMode,
+    [ValidateSet('on', 'off')][string]$Aec,
+    [ValidateSet('gentle', 'normal', 'strong')][string]$AecStrength
 )
 $ErrorActionPreference = 'Stop'
 $path = 'SOFTWARE\WebrtcVoiceApo'
@@ -64,13 +66,16 @@ if ($PSBoundParameters.ContainsKey('AgcSpeed'))        { & $dw 'AgcSpeedDbPerSec
 if ($PSBoundParameters.ContainsKey('AgcNoiseCeiling')) { & $dw 'AgcNoiseCeilingDbfs' $AgcNoiseCeiling }
 if ($PSBoundParameters.ContainsKey('Limiter'))         { & $dw 'LimiterEnabled' (& $onOff $Limiter) }
 if ($GainMode) { & $dw 'GainMode' ([array]::IndexOf(@('auto', 'always', 'never'), $GainMode)) }
+if ($PSBoundParameters.ContainsKey('Aec')) { & $dw 'AecEnabled' (& $onOff $Aec) }
+if ($AecStrength) { & $dw 'AecStrength' ([array]::IndexOf(@('gentle', 'normal', 'strong'), $AecStrength)) }
 
 $get = { param($n, $d) $v = $k.GetValue($n); if ($null -eq $v) { $d } else { [int]$v } }
 $st = { param($v) if ($v) { 'on' } else { 'off' } }
 $cur = @((& $get 'AgcHeadroomDb' 5), (& $get 'AgcMaxGainDb' 30), (& $get 'AgcSpeedDbPerSec' 6), (& $get 'AgcNoiseCeilingDbfs' -50))
 $presetName = ($presets.Keys | Where-Object { (Compare-Object $presets[$_] $cur) -eq $null } | Select-Object -First 1) ?? 'custom'
-Write-Host ("Bypass {0} | HPF {1} @ {2} Hz | NS {3} @ {4} dB | AGC {5} ({6}: headroom {7}, max {8}, speed {9}, noise {10}) | Limiter {11} | Slider gain {12}" -f `
+Write-Host ("Bypass {0} | AEC {13} ({14}) | HPF {1} @ {2} Hz | NS {3} @ {4} dB | AGC {5} ({6}: headroom {7}, max {8}, speed {9}, noise {10}) | Limiter {11} | Slider gain {12}" -f `
     (& $st (& $get 'Bypass' 0)), (& $st (& $get 'HpfEnabled' 1)), (& $get 'HpfHz' 80), (& $st (& $get 'NsEnabled' 1)),
     @(6, 12, 18, 21)[(& $get 'NsLevel' 1)], (& $st (& $get 'AgcEnabled' 0)), $presetName, $cur[0], $cur[1], $cur[2], $cur[3],
-    (& $st (& $get 'LimiterEnabled' 1)), @('auto', 'always', 'never')[(& $get 'GainMode' 0)])
+    (& $st (& $get 'LimiterEnabled' 1)), @('auto', 'always', 'never')[(& $get 'GainMode' 0)],
+    (& $st (& $get 'AecEnabled' 1)), @('gentle', 'normal', 'strong')[(& $get 'AecStrength' 1)])
 $k.Close()

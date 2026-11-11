@@ -212,8 +212,8 @@ int main()
         while (pos < frames)
         {
             const int n = std::min(480, frames - pos);
-            if (k == 100) { Settings s2 = agc; s2.agcMaxGainDb = 50; s2.agcHeadroomDb = 3; vp.RequestAgcParams(s2); }
-            if (k == 200) { Settings s3 = agc; s3.agcSpeedDbPerSec = 10; vp.RequestAgcParams(s3); }
+            if (k == 100) { Settings s2 = agc; s2.agcMaxGainDb = 50; s2.agcHeadroomDb = 3; vp.RequestStageParams(s2); }
+            if (k == 200) { Settings s3 = agc; s3.agcSpeedDbPerSec = 10; vp.RequestStageParams(s3); }
             vp.Process(quiet.data() + static_cast<size_t>(pos) * kCh, y.data() + static_cast<size_t>(pos) * kCh, n, agc, 30.0f);
             pos += n; ++k;
         }
@@ -291,6 +291,80 @@ int main()
         EXPECT(-best > 40.0, "%d Hz: tone SNR %.1f dB too low (resampler path broken?)", rate, -best);
         EXPECT(std::abs(bestD - lat) <= 3, "%d Hz: reported latency %d vs measured %d", rate, lat, bestD);
         EXPECT(red > 3.0, "%d Hz: noise not reduced (%.1f dB)", rate, red);
+    }
+
+    // ----------------------------------------------------------------- AEC3
+    // Feeds the processor block by block, pushing the matching farEnd-end block into the reference ring
+    // first (as AcceptInput does before APOProcess in the engine).
+    auto runAec = [&](const std::vector<float>& mic, const std::vector<float>& farEnd, Settings st, bool withRef,
+                      std::function<void(int, Settings&)> perBlock = nullptr) {
+        ReferenceRing ring;
+        ring.Init(48000);
+        VoiceProcessor vp;
+        vp.SetReference(withRef ? &ring : nullptr);
+        vp.Prepare(kCh, 48000, st);
+        std::vector<float> y(mic.size());
+        const int n = static_cast<int>(mic.size() / kCh);
+        for (int pos = 0, k = 0; pos < n; pos += 480, ++k)
+        {
+            if (perBlock) perBlock(k, st);
+            ring.Write(farEnd.data() + pos, 480);
+            vp.Process(mic.data() + static_cast<size_t>(pos) * kCh, y.data() + static_cast<size_t>(pos) * kCh, 480, st);
+        }
+        return y;
+    };
+
+    std::printf("[11] latency with and without AEC3 matches the reported %d samples (NS/HPF/AGC/limiter off)\n", kLat);
+    {
+        Settings plain = def; plain.nsEnabled = 0; plain.hpfEnabled = 0; plain.limiterEnabled = 0;
+        const int n = 48000;
+        std::vector<float> mic(static_cast<size_t>(kCh) * n, 0.0f), farEnd(n, 0.0f);
+        for (int f = 9600; f < n; f += 9600) for (int c = 0; c < kCh; ++c) mic[static_cast<size_t>(f) * kCh + c] = 0.5f;
+        for (bool withRef : {false, true})
+        {
+            auto y = runAec(mic, farEnd, plain, withRef);
+            int peakAt = -1; float peak = 0;
+            for (int f = 19200; f < 28800; ++f)
+                if (std::fabs(y[static_cast<size_t>(f) * kCh]) > peak) { peak = std::fabs(y[static_cast<size_t>(f) * kCh]); peakAt = f; }
+            std::printf("    %s: impulse at 19200 -> output peak at %d (delay %d)\n", withRef ? "AEC3 path " : "stand-in  ", peakAt, peakAt - 19200);
+            EXPECT(peakAt - 19200 == kLat, "%s delay %d != reported %d", withRef ? "AEC3" : "stand-in", peakAt - 19200, kLat);
+        }
+    }
+
+    std::printf("[12] echo cancellation: farEnd-end echo removed, near-end talker kept\n");
+    {
+        Settings st = def; st.nsEnabled = 0; st.hpfEnabled = 0; st.limiterEnabled = 0;
+        const int n = 48000 * 12;
+        // Far end: speech-like noise bursts (on 300 ms / off 200 ms), 10 s.
+        std::mt19937 rng(11);
+        std::normal_distribution<float> g(0.0f, 0.1f);
+        std::vector<float> farEnd(n, 0.0f);
+        for (int f = 0; f < n; ++f) if ((f / 24000) % 5 < 3 && f < 48000 * 10) farEnd[f] = g(rng);
+        // Echo path: 30 ms delay, -6 dB, simple low-pass (a speaker+room stand-in).
+        std::vector<float> echo(n, 0.0f);
+        float lp = 0.0f;
+        for (int f = 1440; f < n; ++f) { lp += 0.3f * (farEnd[f - 1440] - lp); echo[f] = 0.5f * lp; }
+        // Near end: a quieter 440 Hz talker during the last 2 s only (no farEnd-end then).
+        std::vector<float> mic(static_cast<size_t>(kCh) * n);
+        for (int f = 0; f < n; ++f)
+        {
+            const float nearSig = f >= 48000 * 10 ? 0.05f * std::sin(2.0f * 3.14159265f * 440.0f * f / 48000.0f) : 0.0f;
+            for (int c = 0; c < kCh; ++c) mic[static_cast<size_t>(f) * kCh + c] = echo[f] + nearSig;
+        }
+        auto off = st; off.aecEnabled = 0;
+        auto yOn = runAec(mic, farEnd, st, true);
+        auto yOff = runAec(mic, farEnd, off, true);
+        // Echo-only window after convergence: 6..10 s (shifted by the latency).
+        const size_t e0 = static_cast<size_t>(48000 * 6 + kLat) * kCh, e1 = static_cast<size_t>(48000 * 10 + kLat) * kCh;
+        const double echoOff = RmsDb(yOff, e0, e1), echoOn = RmsDb(yOn, e0, e1);
+        // Near-end window: 10.5..12 s.
+        const size_t n0 = static_cast<size_t>(48000 * 10.5 + kLat) * kCh, n1 = static_cast<size_t>(n) * kCh;
+        const double nearOff = RmsDb(yOff, n0, n1), nearOn = RmsDb(yOn, n0, n1);
+        std::printf("    echo  : AEC off %.1f dBFS -> AEC on %.1f dBFS (%.1f dB removed)\n", echoOff, echoOn, echoOff - echoOn);
+        std::printf("    talker: AEC off %.1f dBFS -> AEC on %.1f dBFS\n", nearOff, nearOn);
+        EXPECT(echoOff - echoOn > 20.0, "only %.1f dB echo removal", echoOff - echoOn);
+        EXPECT(std::fabs(nearOff - nearOn) < 3.0, "near-end talker changed by %.1f dB", nearOn - nearOff);
+        EXPECT(AllFinite(yOn), "non-finite AEC output");
     }
 
     std::printf(g_failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", g_failures);

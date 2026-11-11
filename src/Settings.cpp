@@ -35,9 +35,9 @@ namespace
         settings::Publish(s);
         if (!(s == old))
         {
-            apolog::Write(L"[settings] bypass=%u hpf=%u@%uHz ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u",
+            apolog::Write(L"[settings] bypass=%u hpf=%u@%uHz ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u aec=%u strength=%u",
                           s.bypass, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel, s.gainMode, s.agcEnabled, s.agcHeadroomDb,
-                          s.agcMaxGainDb, s.agcSpeedDbPerSec, s.agcNoiseCeilingDbfs, s.limiterEnabled);
+                          s.agcMaxGainDb, s.agcSpeedDbPerSec, s.agcNoiseCeilingDbfs, s.limiterEnabled, s.aecEnabled, s.aecStrength);
             if (auto hook = g_hook.load())
                 hook(s);
         }
@@ -71,6 +71,10 @@ Settings Settings::ReadFromRegistry() noexcept
     readInt(L"AgcSpeedDbPerSec", s.agcSpeedDbPerSec, 1, 30);
     readInt(L"AgcNoiseCeilingDbfs", s.agcNoiseCeilingDbfs, -80, -20);
     read(L"LimiterEnabled", s.limiterEnabled);
+    read(L"AecEnabled", s.aecEnabled);
+    read(L"AecStrength", s.aecStrength);
+    s.aecEnabled = s.aecEnabled ? 1u : 0u;
+    if (s.aecStrength > 2) s.aecStrength = 1;
     s.agcEnabled = s.agcEnabled ? 1u : 0u;
     s.limiterEnabled = s.limiterEnabled ? 1u : 0u;
 

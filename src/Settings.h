@@ -22,6 +22,8 @@ struct Settings
     int32_t agcSpeedDbPerSec = 6;   // 1..30      presets: gentle 3 / normal 6 / strong 10
     int32_t agcNoiseCeilingDbfs = -50; // -80..-20 presets: gentle -60 / normal -50 / strong -45
     uint32_t limiterEnabled = 1;    // -1 dBFS safety limiter, last in the chain
+    uint32_t aecEnabled = 1;        // WebRTC AEC3 (Communications streams with an echo reference)
+    uint32_t aecStrength = 1;       // 0 = gentle, 1 = normal, 2 = strong (AEC3-Echo-Canceller presets)
 
     bool operator==(const Settings&) const = default;
 

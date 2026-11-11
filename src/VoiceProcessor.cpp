@@ -5,12 +5,29 @@
 #include <cmath>
 #include <cstring>
 #include <numbers>
+#include "AecConfig.h"
 #include "api/audio/audio_processing.h"
+#include "api/audio/echo_canceller3_factory.h"
+#include "api/audio/echo_control.h"
+#include "api/environment/environment_factory.h"
 #include "modules/audio_processing/audio_buffer.h"
 #include "modules/audio_processing/ns/noise_suppressor.h"
 #include "speex/speex_resampler.h"
 
-static_assert(VoiceProcessor::kAlgorithmLatency <= VoiceProcessor::kBlock, "Delay assumes latency <= block");
+static_assert(VoiceProcessor::kAecLatency % 3 == 0, "AEC stand-in delays each 16 kHz band by kAecLatency / 3");
+
+// ------------------------------------------------------------------ AEC3 instance
+
+struct VoiceProcessor::AecInstance
+{
+    explicit AecInstance(unsigned strength)
+    {
+        const auto env = webrtc::CreateEnvironment();
+        webrtc::EchoCanceller3Factory factory(aecconfig::Build(aecconfig::ForStrength(strength)));
+        controller = factory.Create(env, kSampleRate, 1, 1);
+    }
+    std::unique_ptr<webrtc::EchoControl> controller;
+};
 
 // ------------------------------------------------------------------ live-processor registry
 // Only touched on non-RT threads (Prepare/Deactivate/destructor and the settings watcher).
@@ -34,6 +51,29 @@ namespace
     {
         HookInstaller() { settings::SetChangeHook(&VoiceProcessor::OnSettingsChanged); }
     } g_hookInstaller;
+
+
+    // AudioBuffer::CopyFrom/CopyTo clamp to +-1.0 (FloatToFloatS16 / FloatS16ToFloat). Our chain may run
+    // above full scale before the limiter (e.g. +30 dB slider gain), so load/store the int16-range data
+    // directly, without clamping. Mono, same rate: no resampling or downmixing is involved.
+    void Load(webrtc::AudioBuffer& buf, const float* src) noexcept
+    {
+        float* d = buf.channels()[0];
+        for (int i = 0; i < VoiceProcessor::kBlock; ++i) d[i] = src[i] * 32768.0f;
+    }
+    void Store(const webrtc::AudioBuffer& buf, float* dst) noexcept
+    {
+        const float* s = buf.channels_const()[0];
+        for (int i = 0; i < VoiceProcessor::kBlock; ++i) dst[i] = s[i] * (1.0f / 32768.0f);
+    }
+
+    void CopyBands(const webrtc::AudioBuffer& from, webrtc::AudioBuffer& to) noexcept
+    {
+        const float* const* a = from.split_bands_const(0);
+        float* const* b = to.split_bands(0);
+        for (int band = 0; band < VoiceProcessor::kBands; ++band)
+            std::memcpy(b[band], a[band], sizeof(float) * VoiceProcessor::kBandSize);
+    }
 }
 
 void VoiceProcessor::Register()
@@ -59,47 +99,27 @@ void VoiceProcessor::OnSettingsChanged(const Settings& s)
     AcquireSRWLockExclusive(&g_registryLock);  // held while rebuilding, so no processor can be destroyed meanwhile
     if (g_registry)
         for (VoiceProcessor* p : *g_registry)
-            p->RequestAgcParams(s);
+            p->RequestStageParams(s);
     ReleaseSRWLockExclusive(&g_registryLock);
 }
 
-void VoiceProcessor::RequestAgcParams(const Settings& s)
+void VoiceProcessor::RequestStageParams(const Settings& s)
 {
     const AgcParams want = ParamsFrom(s);
-    if (want == m_agcRequested)
-        return;
-    delete m_agcRetired.exchange(nullptr);  // the stage the RT thread swapped out last time
-    auto* fresh = new AgcStage(want, m_agcGainDb.load(std::memory_order_relaxed));  // keep the learnt gain
-    delete m_agcPending.exchange(fresh);    // an older request the RT thread never picked up
-    m_agcRequested = want;
+    if (!(want == m_agcRequested))
+    {
+        delete m_agcRetired.exchange(nullptr);  // the stage the RT thread swapped out last time
+        auto* fresh = new AgcStage(want, m_agcGainDb.load(std::memory_order_relaxed));  // keep the learnt gain
+        delete m_agcPending.exchange(fresh);    // an older request the RT thread never picked up
+        m_agcRequested = want;
+    }
+    if (m_aec && s.aecStrength != m_aecStrengthRequested)
+    {
+        delete m_aecRetired.exchange(nullptr);
+        delete m_aecPending.exchange(new AecInstance(s.aecStrength));
+        m_aecStrengthRequested = s.aecStrength;
+    }
 }
-
-// ------------------------------------------------------------------ NS (one level, mono)
-
-struct VoiceProcessor::NsLevel
-{
-    explicit NsLevel(int level) : buf(kSampleRate, 1, kSampleRate, 1, kSampleRate, 1), cfg(kSampleRate, 1)
-    {
-        webrtc::NsConfig c;
-        c.target_level = static_cast<webrtc::NsConfig::SuppressionLevel>(level);
-        ns = std::make_unique<webrtc::NoiseSuppressor>(c, static_cast<size_t>(kSampleRate), static_cast<size_t>(1));
-    }
-    // in/out: 480 samples, +-1.0 scale (AudioBuffer converts to/from the int16 range).
-    void Run(const float* in, float* out) noexcept
-    {
-        const float* src[1] = {in};
-        buf.CopyFrom(src, cfg);
-        buf.SplitIntoFrequencyBands();
-        ns->Analyze(buf);
-        ns->Process(&buf);
-        buf.MergeFrequencyBands();
-        float* dst[1] = {out};
-        buf.CopyTo(cfg, dst);
-    }
-    webrtc::AudioBuffer buf;
-    webrtc::StreamConfig cfg;
-    std::unique_ptr<webrtc::NoiseSuppressor> ns;
-};
 
 // ------------------------------------------------------------------ resampling (non-48 kHz devices)
 
@@ -172,12 +192,21 @@ float VoiceProcessor::Biquad::Run(float x) noexcept
     return y;
 }
 
-void VoiceProcessor::Delay::Run(const float* in, float* out) noexcept
+void VoiceProcessor::VarDelay::Run(const float* in, float* out, int n) noexcept
 {
-    constexpr int L = kAlgorithmLatency;
-    std::memcpy(out, hist.data(), L * sizeof(float));
-    std::memcpy(out + L, in, (kBlock - L) * sizeof(float));
-    std::memcpy(hist.data(), in + (kBlock - L), L * sizeof(float));
+    if (buf.empty())
+    {
+        if (in != out) std::memcpy(out, in, sizeof(float) * n);
+        return;
+    }
+    const size_t len = buf.size();
+    for (int i = 0; i < n; ++i)
+    {
+        const float x = in[i];
+        out[i] = buf[pos];
+        buf[pos] = x;
+        if (++pos == len) pos = 0;
+    }
 }
 
 // ------------------------------------------------------------------ lifecycle
@@ -189,6 +218,8 @@ VoiceProcessor::~VoiceProcessor()
     Unregister();
     delete m_agcPending.exchange(nullptr);
     delete m_agcRetired.exchange(nullptr);
+    delete m_aecPending.exchange(nullptr);
+    delete m_aecRetired.exchange(nullptr);
 }
 
 void VoiceProcessor::Deactivate() noexcept
@@ -225,8 +256,29 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
 
     m_channels = channels;
     m_ch.resize(static_cast<size_t>(channels));
+    for (auto& c : m_ch)
+        c.dry.Init(kAlgorithmLatency);
+
+    auto newBuffer = [] { return std::make_unique<webrtc::AudioBuffer>(kSampleRate, 1, kSampleRate, 1, kSampleRate, 1); };
+    m_cap = newBuffer();
+    m_render = newBuffer();
     for (int l = 0; l < kNsLevels; ++l)
-        m_ns[l] = std::make_unique<NsLevel>(l);  // fresh state per stream
+    {
+        m_nsBuf[l] = newBuffer();
+        webrtc::NsConfig c;
+        c.target_level = static_cast<webrtc::NsConfig::SuppressionLevel>(l);
+        m_ns[l] = std::make_unique<webrtc::NoiseSuppressor>(c, static_cast<size_t>(kSampleRate), static_cast<size_t>(1));
+    }
+    for (auto& d : m_aecStandIn)
+        d.Init(kAecLatency / 3);
+    m_nsDry.Init(kNsLatency);
+
+    delete m_aecPending.exchange(nullptr);
+    delete m_aecRetired.exchange(nullptr);
+    m_aecStrengthRequested = initial.aecStrength;
+    m_aec = m_refRing ? std::make_unique<AecInstance>(initial.aecStrength) : nullptr;
+    m_refUnderruns = 0;
+
     if (!m_limiter)
         m_limiter = std::make_unique<OutputLimiter>();
     delete m_agcPending.exchange(nullptr);
@@ -259,12 +311,13 @@ void VoiceProcessor::Reset() noexcept
 {
     for (auto& c : m_ch)
     {
-        c.dry.hist.fill(0.0f);
+        c.dry.Clear();
         c.in.fill(0.0f);
         c.out.fill(0.0f);
     }
     m_hpf.z1 = m_hpf.z2 = 0;
-    m_dryAfterHpf.hist.fill(0.0f);
+    for (auto& d : m_aecStandIn) d.Clear();
+    m_nsDry.Clear();
     if (m_limiter) m_limiter->Reset();
     m_pos = 0;
     m_nextLevel = -1;
@@ -303,15 +356,19 @@ void VoiceProcessor::ApplySettings(const Settings& s) noexcept
 
 void VoiceProcessor::ProcessBlock() noexcept
 {
-    // Pick up an AGC stage rebuilt by the settings watcher (parameter change).
+    // Pick up stages rebuilt by the settings watcher. The old ones go back through the "retired"
+    // slots for freeing on a non-RT thread (the watcher empties those before every rebuild).
     if (AgcStage* fresh = m_agcPending.exchange(nullptr))
     {
-        AgcStage* old = m_agc.release();
-        m_agc.reset(fresh);
-        // Hand the old stage back for freeing on a non-RT thread. The watcher empties this slot before
-        // it builds each new stage, so it is free here; if not, leaking one stage beats freeing in RT.
         AgcStage* expected = nullptr;
-        m_agcRetired.compare_exchange_strong(expected, old);
+        m_agcRetired.compare_exchange_strong(expected, m_agc.release());
+        m_agc.reset(fresh);
+    }
+    if (AecInstance* fresh = m_aecPending.exchange(nullptr))
+    {
+        AecInstance* expected = nullptr;
+        m_aecRetired.compare_exchange_strong(expected, m_aec.release());
+        m_aec.reset(fresh);
     }
 
     const float invCh = 1.0f / static_cast<float>(m_channels);
@@ -325,7 +382,7 @@ void VoiceProcessor::ProcessBlock() noexcept
             c.in[i] = (std::isfinite(x) ? x : 0.0f) * m_gain.At(i);
             m_mono[i] += c.in[i] * invCh;
         }
-        c.dry.Run(c.in.data(), c.delayed.data());  // latency-matched original channel (bypass path)
+        c.dry.Run(c.in.data(), c.delayed.data(), kBlock);  // latency-matched original channel (bypass)
     }
 
     // 1. High-pass filter.
@@ -334,29 +391,73 @@ void VoiceProcessor::ProcessBlock() noexcept
         const float y = m_hpf.Run(m_mono[i]);
         m_s1[i] = m_mono[i] + m_hpfMix.At(i) * (y - m_mono[i]);
     }
-    m_dryAfterHpf.Run(m_s1.data(), m_d1.data());
 
-    // 2. Noise suppression: all levels run (they stay adapted); output the active one, crossfading
-    //    to the next one when the level changes.
+    // 2. Echo reference for this block (silence when AEC is off or the loopback ran dry).
+    if (m_aec)
+    {
+        bool have = false;
+        if (m_refRing)
+        {
+            m_refRing->TrimTo(4 * kBlock);  // bound the reference queue (AEC3 tracks the remaining delay)
+            have = m_refRing->Read(m_ref.data(), kBlock);
+        }
+        if (!have) { m_ref.fill(0.0f); ++m_refUnderruns; }
+        if (!m_settings.aecEnabled) m_ref.fill(0.0f);
+        Load(*m_render, m_ref.data());
+        m_render->SplitIntoFrequencyBands();
+        m_aec->controller->AnalyzeRender(m_render.get());
+    }
+
+    // 3. Capture in the band domain, WebRTC APM order: AEC analyse -> split -> NS analyse (pre-AEC)
+    //    -> AEC process -> NS process.
+    Load(*m_cap, m_s1.data());
+    if (m_aec) m_aec->controller->AnalyzeCapture(m_cap.get());
+    m_cap->SplitIntoFrequencyBands();
     for (int l = 0; l < kNsLevels; ++l)
     {
-        float* dst = l == m_level ? m_nsOut.data() : (l == m_nextLevel ? m_nsAlt.data() : m_tmp.data());
-        m_ns[l]->Run(m_s1.data(), dst);
+        CopyBands(*m_cap, *m_nsBuf[l]);
+        m_ns[l]->Analyze(*m_nsBuf[l]);
     }
+    if (m_aec)
+    {
+        m_aec->controller->SetAudioBufferDelay(0);
+        m_aec->controller->ProcessCapture(m_cap.get(), false);
+    }
+    else
+    {
+        float* const* b = m_cap->split_bands(0);
+        for (int band = 0; band < kBands; ++band)
+            m_aecStandIn[band].Run(b[band], b[band], kBandSize);  // same delay as AEC3 would add
+    }
+    for (int l = 0; l < kNsLevels; ++l)
+    {
+        CopyBands(*m_cap, *m_nsBuf[l]);
+        m_ns[l]->Process(m_nsBuf[l].get());  // all levels keep their state current
+    }
+    auto mergeTo = [](webrtc::AudioBuffer& buf, float* dst) {
+        buf.MergeFrequencyBands();
+        Store(buf, dst);
+    };
+    mergeTo(*m_nsBuf[m_level], m_nsOut.data());
     if (m_nextLevel >= 0)
+    {
+        mergeTo(*m_nsBuf[m_nextLevel], m_nsAlt.data());
         for (int i = 0; i < kBlock; ++i)
             m_nsOut[i] += (static_cast<float>(i + 1) / kBlock) * (m_nsAlt[i] - m_nsOut[i]);
+    }
+    mergeTo(*m_cap, m_postAec.data());                   // post-AEC, pre-NS (NS off path)
+    m_nsDry.Run(m_postAec.data(), m_d1.data(), kBlock);  // aligned with the NS output
     for (int i = 0; i < kBlock; ++i)
         m_voice[i] = m_d1[i] + m_nsMix.At(i) * (m_nsOut[i] - m_d1[i]);
 
-    // 3. AGC2 (always runs so its gain stays adapted; mixed in when enabled).
+    // 4. AGC2 (always runs so its gain stays adapted; mixed in when enabled).
     std::memcpy(m_tmp.data(), m_voice.data(), sizeof(m_tmp));
     m_agc->Process(m_tmp.data());
     m_agcGainDb.store(m_agc->LastGainDb(), std::memory_order_relaxed);
     for (int i = 0; i < kBlock; ++i)
         m_voice[i] += m_agcMix.At(i) * (m_tmp[i] - m_voice[i]);
 
-    // 4. Limiter (-1 dBFS), last.
+    // 5. Limiter (-1 dBFS), last.
     m_limiter->Process(m_voice.data(), m_tmp.data());
     m_limiterDb.store(m_limiter->LastReductionDb(), std::memory_order_relaxed);
     for (int i = 0; i < kBlock; ++i)

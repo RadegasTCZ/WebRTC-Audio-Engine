@@ -6,6 +6,7 @@
 #include <audioengineextensionapo.h>
 #include <atomic>
 #include "VoiceProcessor.h"
+#include "ReferenceRing.h"
 
 // MFX = bit-exact probe; EFX = NS appended to the OEM endpoint chain; Pack = NS as our own effect pack.
 enum class ApoSlot { MFX, EFX, Pack };
@@ -14,7 +15,8 @@ enum class ApoSlot { MFX, EFX, Pack };
 // Milestone 1, step 1: pass-through probe.
 // Audio is copied through untouched. Non-real-time callbacks log what the audio engine
 // tells us (slot, processing mode, endpoint, format); APOProcess only updates counters.
-class CProbeApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects3, public IAudioProcessingObjectNotifications
+class CProbeApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects3, public IAudioProcessingObjectNotifications,
+                        public IApoAcousticEchoCancellation2, public IApoAuxiliaryInputConfiguration, public IApoAuxiliaryInputRT
 {
 public:
     // The audio engine creates APOs AGGREGATED (pUnkOuter != null), so we implement the
@@ -53,6 +55,15 @@ public:
     // delivers APO notifications). We expose no Windows-controllable sub-effects.
     STDMETHOD(GetControllableSystemEffectsList)(AUDIO_SYSTEMEFFECT** effects, UINT* numEffects, HANDLE event) override;
     STDMETHOD(SetAudioSystemEffectState)(GUID effectId, AUDIO_SYSTEMEFFECT_STATE state) override;
+
+    // Echo cancellation reference (capture MFX in COMMUNICATIONS mode only):
+    // IApoAcousticEchoCancellation(2) marks us as an AEC; the engine then attaches the render loopback
+    // as an auxiliary input and feeds it through AcceptInput.
+    STDMETHOD(GetDesiredReferenceStreamProperties)(APO_REFERENCE_STREAM_PROPERTIES* pProperties) override;
+    STDMETHOD(AddAuxiliaryInput)(DWORD dwInputId, UINT32 cbDataSize, BYTE* pbyData, APO_CONNECTION_DESCRIPTOR* pInputConnection) override;
+    STDMETHOD(RemoveAuxiliaryInput)(DWORD dwInputId) override;
+    STDMETHOD(IsInputFormatSupported)(IAudioMediaType* pRequestedInputFormat, IAudioMediaType** ppSupportedInputFormat) override;
+    STDMETHOD_(void, AcceptInput)(DWORD dwInputId, const APO_CONNECTION_PROPERTY* pInputConnection) override;
 
     // IAudioProcessingObjectNotifications (Windows 11): endpoint volume -> software slider gain
     STDMETHOD(GetApoNotificationRegistrationInfo)(APO_NOTIFICATION_DESCRIPTOR** apoNotifications, DWORD* count) override;
@@ -96,6 +107,16 @@ private:
     bool m_hardwareVolumeBus = false;    // USB / Bluetooth endpoint
     std::atomic<float> m_sliderDb{0.0f};
     float SliderGainDb(const Settings& s) const noexcept;
+
+    // Echo reference (render loopback) from the auxiliary input, downmixed to mono.
+    bool IsAecCandidate() const noexcept;   // Pack slot + COMMUNICATIONS mode
+    ReferenceRing m_ref;
+    std::atomic<bool> m_refActive{false};
+    DWORD m_refInputId = 0;
+    UINT32 m_refChannels = 0;
+    float m_refRate = 0.0f;
+    bool m_refFloat = false;
+    std::atomic<uint64_t> m_refFrames{0}, m_refCalls{0}, m_refDropped{0}, m_refSilentCalls{0};
 
     // Cached at LockForProcess (never changes while locked).
     UINT32 m_bytesPerFrame = 0;
