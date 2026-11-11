@@ -1,6 +1,6 @@
 // Opens the default capture endpoint through WASAPI (shared mode) like an app would,
 // records a few seconds and reports every HRESULT + the peak level.
-// Usage: CaptureTest.exe [default|comms|raw|rawcomms] [seconds]
+// Usage: CaptureTest.exe [default|comms|raw|rawcomms] [seconds] [slider 0..100]
 //   default  : AudioCategory_Other, no RAW            (typical recorder)
 //   comms    : AudioCategory_Communications, no RAW   (Teams/Discord style)
 //   raw      : AUDCLNT_STREAMOPTIONS_RAW              (bypasses SFX/MFX)
@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <endpointvolume.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <cstdio>
 #include <cmath>
@@ -35,6 +36,19 @@ int wmain(int argc, wchar_t** argv)
         std::wprintf(L"Endpoint: %s  %s\n", pv.pwszVal, id);
     PropVariantClear(&pv); if (ps) ps->Release(); CoTaskMemFree(id);
 
+    // Optional 3rd arg: endpoint volume slider 0..100 to set before recording (restored afterwards).
+    IAudioEndpointVolume* vol = nullptr;
+    float oldVol = -1.0f;
+    if (argc > 3 && SUCCEEDED(dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&vol))))
+    {
+        vol->GetMasterVolumeLevelScalar(&oldVol);
+        const float v = static_cast<float>(_wtoi(argv[3])) / 100.0f;
+        vol->SetMasterVolumeLevelScalar(v, nullptr);
+        float db = 0; vol->GetMasterVolumeLevel(&db);
+        std::printf("Slider set to %.0f%% (%.1f dB), was %.0f%%\n", v * 100, db, oldVol * 100);
+        Sleep(200);
+    }
+
     IAudioClient2* client = nullptr;
     CHECK(dev->Activate(__uuidof(IAudioClient2), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&client)));
 
@@ -54,7 +68,7 @@ int wmain(int argc, wchar_t** argv)
     CHECK(client->Start());
 
     // Mix format in shared mode is float32 on all current Windows versions.
-    float peak = 0.0f; UINT64 frames = 0; UINT32 silentPackets = 0;
+    float peak = 0.0f; double sumSq = 0.0; UINT64 samples = 0; UINT64 frames = 0; UINT32 silentPackets = 0;
     const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
     while (GetTickCount64() < end)
     {
@@ -68,16 +82,17 @@ int wmain(int argc, wchar_t** argv)
             else
             {
                 const float* f = reinterpret_cast<const float*>(data);
-                for (UINT32 i = 0; i < got * mix->nChannels; ++i) peak = (std::fabs(f[i]) > peak) ? std::fabs(f[i]) : peak;
+                for (UINT32 i = 0; i < got * mix->nChannels; ++i) { peak = (std::fabs(f[i]) > peak) ? std::fabs(f[i]) : peak; sumSq += static_cast<double>(f[i]) * f[i]; ++samples; }
             }
             frames += got;
             cap->ReleaseBuffer(got);
         }
     }
     client->Stop();
-    std::printf("Captured %llu frames (%.2f s), silent packets %u, peak %.1f dBFS\n", frames,
-                frames / static_cast<double>(mix->nSamplesPerSec), silentPackets,
+    std::printf("Captured %llu frames (%.2f s), silent packets %u, rms %.1f dBFS, peak %.1f dBFS\n", frames,
+                frames / static_cast<double>(mix->nSamplesPerSec), silentPackets, (samples && sumSq > 0) ? 10.0 * std::log10(sumSq / samples) : -999.0,
                 peak > 0 ? 20.0 * std::log10(peak) : -999.0);
+    if (vol) { vol->SetMasterVolumeLevelScalar(oldVol, nullptr); vol->Release(); }
     CoTaskMemFree(mix); cap->Release(); client->Release(); dev->Release(); en->Release();
     CoUninitialize();
     return 0;
