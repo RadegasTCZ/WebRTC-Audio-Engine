@@ -26,20 +26,38 @@ public:
     static constexpr int kAlgorithmLatency = 334;   // filter bank 46 + NS overlap 3*96
     static constexpr int kTotalLatency = kBlock + kAlgorithmLatency;
 
+    static constexpr int kMinRate = 8000;
+    static constexpr int kMaxRate = 192000;
+
     VoiceProcessor();
     ~VoiceProcessor();
 
+    // Any rate in [8 kHz, 192 kHz]: 48 kHz is processed directly, other rates are resampled to
+    // 48 kHz and back (SpeexDSP, quality 5) with a fixed output buffer, so latency stays constant.
+    // maxFrames = the largest period the engine will hand us (LockForProcess u32MaxFrameCount).
     // Returns false (and stays in pass-through) if the format is unsupported.
-    bool Prepare(int channels, int sampleRate, const Settings& initial);
+    bool Prepare(int channels, int sampleRate, const Settings& initial, int maxFrames = 4096);
     void Deactivate() noexcept { m_active = false; }
     bool IsActive() const noexcept { return m_active; }
     void Reset() noexcept;
+
+    // Total latency in frames at the device rate (constant for a given format).
+    int LatencyFrames() const noexcept { return m_latencyFrames; }
+    int SampleRate() const noexcept { return m_rate; }
+    uint64_t Underruns() const noexcept { return m_underruns; }
 
     // Interleaved float32. in and out may be the same buffer (in-place).
     // `s` is applied at the next 10 ms block boundary.
     void Process(const float* in, float* out, int frames, const Settings& s) noexcept;
 
 private:
+    struct Resampling;
+    void ProcessCore(const float* in, float* out, int frames, const Settings& s) noexcept;  // 48 kHz stream
+    std::unique_ptr<Resampling> m_rs;   // null at 48 kHz
+    int m_rate = 0;
+    int m_latencyFrames = 0;
+    uint64_t m_underruns = 0;
+
     struct NsChain;
     struct Biquad
     {

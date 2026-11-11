@@ -152,8 +152,72 @@ int main()
 
     std::printf("[9] unsupported formats stay inactive\n");
     VoiceProcessor p;
-    EXPECT(!p.Prepare(2, 44100, def) && !p.IsActive(), "44.1 kHz should be refused");
+    EXPECT(!p.Prepare(2, 4000, def) && !p.IsActive(), "4 kHz should be refused");
     EXPECT(!p.Prepare(9, 48000, def), "9 channels should be refused");
+
+    std::printf("[10] other sample rates (resampled via 48 kHz): no underruns, steady latency, tone intact, noise reduced\n");
+    for (int rate : {8000, 16000, 22050, 32000, 44100, 88200, 96000, 192000})
+    {
+        const int n = rate * 4;
+        const float toneHz = std::min(1000.0f, rate / 8.0f);
+        auto run = [&](const std::vector<float>& x, Settings st, const std::vector<int>& periods, uint64_t& underruns, int& latency) {
+            VoiceProcessor vp;
+            vp.Prepare(kCh, rate, st, 2048);
+            latency = vp.LatencyFrames();
+            std::vector<float> y(x.size());
+            int pos = 0, k = 0;
+            while (pos < n)
+            {
+                const int len = std::min(periods[static_cast<size_t>(k++) % periods.size()], n - pos);
+                vp.Process(x.data() + static_cast<size_t>(pos) * kCh, y.data() + static_cast<size_t>(pos) * kCh, len, st);
+                pos += len;
+            }
+            underruns = vp.Underruns();
+            return y;
+        };
+        // Tone through bypass: must come out as a clean delayed copy (only resampler filtering).
+        std::vector<float> tone(static_cast<size_t>(kCh) * n);
+        for (int f = 0; f < n; ++f)
+            for (int c = 0; c < kCh; ++c)
+                tone[static_cast<size_t>(f) * kCh + c] = 0.25f * std::sin(2.0f * 3.14159265f * toneHz * f / rate);
+        uint64_t ur = 0; int lat = 0;
+        Settings b = def; b.bypass = 1;
+        auto y = run(tone, b, {rate / 100, 7, rate / 100 + 13, 1024, 333}, ur, lat);
+        // Distortion: least-squares fit of a sine at the tone frequency (any phase = any fractional
+        // delay); everything left over is distortion, glitches or dropouts.
+        const double w = 2.0 * 3.14159265358979 * toneHz / rate;
+        double ss = 0, sc = 0, cc = 0, ys = 0, yc = 0;
+        for (int f = n / 2; f < n; ++f)
+        {
+            const double s = std::sin(w * f), c = std::cos(w * f), v = y[static_cast<size_t>(f) * kCh];
+            ss += s * s; sc += s * c; cc += c * c; ys += v * s; yc += v * c;
+        }
+        const double det = ss * cc - sc * sc, A = (ys * cc - yc * sc) / det, B = (yc * ss - ys * sc) / det;
+        double fitPow = 0, resPow = 0;
+        for (int f = n / 2; f < n; ++f)
+        {
+            const double fit = A * std::sin(w * f) + B * std::cos(w * f), v = y[static_cast<size_t>(f) * kCh];
+            fitPow += fit * fit; resPow += (v - fit) * (v - fit);
+        }
+        const double best = -10.0 * std::log10(fitPow / (resPow + 1e-30));
+        // Delay from the fitted phase, unwrapped to the period nearest the reported latency.
+        const double period = rate / toneHz;
+        double d = std::fmod(-std::atan2(B, A) / w, period);
+        if (d < 0) d += period;
+        d += std::round((lat - d) / period) * period;
+        const int bestD = static_cast<int>(std::lround(d));
+        // Steady noise through the full chain must be reduced.
+        auto nz = Noise(n, -40.0f, 7);
+        uint64_t ur2 = 0; int lat2 = 0;
+        auto ny = run(nz, def, {rate / 100}, ur2, lat2);
+        const double red = RmsDb(nz, nz.size() / 2, nz.size()) - RmsDb(ny, ny.size() / 2, ny.size());
+        std::printf("    %6d Hz: latency %4d frames (best match %4d), tone SNR %5.1f dB, noise -%4.1f dB, underruns %llu/%llu\n",
+                    rate, lat, bestD, -best, red, ur, ur2);
+        EXPECT(ur == 0 && ur2 == 0, "%d Hz: underruns", rate);
+        EXPECT(-best > 40.0, "%d Hz: tone SNR %.1f dB too low (resampler path broken?)", rate, -best);
+        EXPECT(std::abs(bestD - lat) <= 3, "%d Hz: reported latency %d vs measured %d", rate, lat, bestD);
+        EXPECT(red > 3.0, "%d Hz: noise not reduced (%.1f dB)", rate, red);
+    }
 
     std::printf(g_failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;

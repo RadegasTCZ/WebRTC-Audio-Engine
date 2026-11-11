@@ -161,7 +161,7 @@ STDMETHODIMP CProbeApo::GetLatency(HNSTIME* pTime)
     if (!pTime)
         return E_POINTER;
     // HNSTIME is in 100 ns units.
-    *pTime = m_proc.IsActive() ? static_cast<HNSTIME>(VoiceProcessor::kTotalLatency) * 10000000 / VoiceProcessor::kSampleRate : 0;
+    *pTime = m_proc.IsActive() ? static_cast<HNSTIME>(m_proc.LatencyFrames()) * 10000000 / m_proc.SampleRate() : 0;
     return S_OK;
 }
 
@@ -251,10 +251,15 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
             apolog::Write(L"[%s #%ld] processing off: format is not float32", SlotName(), m_instanceId);
         else
         {
-            ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(fmt.fFramesPerSecond), s);
-            apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f latency=%d samples",
+            const UINT32 maxFrames = std::max(u32NumInputConnections ? ppInputConnections[0]->u32MaxFrameCount : 0u,
+                                              u32NumOutputConnections ? ppOutputConnections[0]->u32MaxFrameCount : 0u);
+            ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(std::lround(fmt.fFramesPerSecond)), s,
+                                static_cast<int>(maxFrames ? maxFrames : 4096));
+            apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f%s maxFrames=%u latency=%d frames",
                           SlotName(), m_instanceId, ok ? L"ACTIVE" : L"off (unsupported format)", s.bypass, s.hpfEnabled,
-                          s.hpfHz, s.nsEnabled, s.nsLevel, m_channels, fmt.fFramesPerSecond, ok ? VoiceProcessor::kTotalLatency : 0);
+                          s.hpfHz, s.nsEnabled, s.nsLevel, m_channels, fmt.fFramesPerSecond,
+                          ok && m_proc.SampleRate() != VoiceProcessor::kSampleRate ? L" (resampled via 48 kHz)" : L"",
+                          maxFrames, ok ? m_proc.LatencyFrames() : 0);
         }
     }
 
@@ -272,9 +277,9 @@ STDMETHODIMP CProbeApo::UnlockForProcess()
 {
     const double seconds = (GetTickCount64() - m_lockTick) / 1000.0;
     const double peakDb = m_peak > 0.0f ? 20.0 * std::log10(static_cast<double>(m_peak)) : -999.0;
-    apolog::Write(L"[%s #%ld] UnlockForProcess mode=%s after %.1f s: calls=%llu validFrames=%llu silentCalls=%llu period=%u..%u frames peak=%.1f dBFS",
+    apolog::Write(L"[%s #%ld] UnlockForProcess mode=%s after %.1f s: calls=%llu validFrames=%llu silentCalls=%llu period=%u..%u frames peak=%.1f dBFS underruns=%llu",
                   SlotName(), m_instanceId, ModeName(m_mode), seconds, m_processCalls, m_validFrames, m_silentCalls,
-                  m_maxPeriod ? m_minPeriod : 0, m_maxPeriod, peakDb);
+                  m_maxPeriod ? m_minPeriod : 0, m_maxPeriod, peakDb, m_proc.Underruns());
     return CBaseAudioProcessingObject::UnlockForProcess();
 }
 

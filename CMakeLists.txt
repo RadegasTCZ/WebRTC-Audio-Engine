@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(WebrtcVoiceApo LANGUAGES CXX)
+project(WebrtcVoiceApo LANGUAGES C CXX)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "Build x64 only (audiodg.exe is 64-bit).")
@@ -17,6 +17,7 @@ add_library(voice_core STATIC
   ${WEBRTC_NS_SOURCES}
   third_party/webrtc/modules/audio_processing/three_band_filter_bank.cc
   third_party/webrtc/common_audio/third_party/ooura/fft_size_256/fft4g.cc
+  third_party/speexdsp/resample.c
   src/VoiceProcessor.cpp
   src/VoiceProcessor.h
   src/Settings.cpp
@@ -24,7 +25,8 @@ add_library(voice_core STATIC
   src/Log.cpp
   src/Log.h
 )
-target_include_directories(voice_core PUBLIC third_party/webrtc/shim third_party/webrtc)
+target_include_directories(voice_core PUBLIC third_party/webrtc/shim third_party/webrtc third_party/speexdsp)
+set_source_files_properties(third_party/speexdsp/resample.c PROPERTIES COMPILE_OPTIONS "/W0")
 target_compile_definitions(voice_core PUBLIC NOMINMAX _USE_MATH_DEFINES)
 target_compile_options(voice_core PRIVATE /W3 /guard:cf)
 set_source_files_properties(${WEBRTC_NS_SOURCES} PROPERTIES COMPILE_OPTIONS "/W0")
