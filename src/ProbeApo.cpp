@@ -156,23 +156,6 @@ STDMETHODIMP CProbeApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
     return S_OK;
 }
 
-// ---------------------------------------------------------------- Settings
-
-ApoSettings ApoSettings::Read() noexcept
-{
-    ApoSettings s;
-    auto readDword = [](const wchar_t* name, DWORD& value) {
-        DWORD v = 0, size = sizeof(v);
-        if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WebrtcVoiceApo", name, RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS)
-            value = v;
-    };
-    readDword(L"NsLevel", s.nsLevel);
-    readDword(L"Bypass", s.bypass);
-    if (s.nsLevel > 3)
-        s.nsLevel = 1;
-    return s;
-}
-
 STDMETHODIMP CProbeApo::GetLatency(HNSTIME* pTime)
 {
     if (!pTime)
@@ -257,24 +240,21 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
     ResetStats();
     m_lockTick = GetTickCount64();
 
-    // Noise suppression runs in the EFX and in the effect pack; the plain MFX stays a pure probe.
-    m_proc.Prepare(0, 0, VoiceProcessor::Level::k12dB);  // deactivate (frees nothing on RT path)
+    // Voice processing runs in the EFX and in the effect pack; the plain MFX stays a pure probe.
+    m_proc.Deactivate();
     if (m_slot != ApoSlot::MFX)
     {
-        const ApoSettings s = ApoSettings::Read();
+        settings::EnsureWatcher();  // live settings (non-RT here)
+        const Settings s = settings::Current();
         bool ok = false;
-        if (s.bypass)
-            apolog::Write(L"[%s #%ld] NS bypassed by setting (Bypass=1)", SlotName(), m_instanceId);
-        else if (!m_isFloat32)
-            apolog::Write(L"[%s #%ld] NS off: format is not float32", SlotName(), m_instanceId);
+        if (!m_isFloat32)
+            apolog::Write(L"[%s #%ld] processing off: format is not float32", SlotName(), m_instanceId);
         else
         {
-            ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(fmt.fFramesPerSecond),
-                                static_cast<VoiceProcessor::Level>(s.nsLevel));
-            apolog::Write(L"[%s #%ld] NS %s: level=%u (%s dB) channels=%u rate=%.0f latency=%d samples",
-                          SlotName(), m_instanceId, ok ? L"ACTIVE" : L"off (unsupported format)", s.nsLevel,
-                          s.nsLevel == 0 ? L"6" : s.nsLevel == 1 ? L"12" : s.nsLevel == 2 ? L"18" : L"21",
-                          m_channels, fmt.fFramesPerSecond, ok ? VoiceProcessor::kTotalLatency : 0);
+            ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(fmt.fFramesPerSecond), s);
+            apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f latency=%d samples",
+                          SlotName(), m_instanceId, ok ? L"ACTIVE" : L"off (unsupported format)", s.bypass, s.hpfEnabled,
+                          s.hpfHz, s.nsEnabled, s.nsLevel, m_channels, fmt.fFramesPerSecond, ok ? VoiceProcessor::kTotalLatency : 0);
         }
     }
 
@@ -320,11 +300,11 @@ STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CON
         // NS keeps a continuous timeline: silent buffers are fed as zeros so the FIFO stays in step.
         float* o = reinterpret_cast<float*>(out->pBuffer);
         if (in->u32BufferFlags == BUFFER_VALID)
-            m_proc.Process(reinterpret_cast<const float*>(in->pBuffer), o, static_cast<int>(frames));
+            m_proc.Process(reinterpret_cast<const float*>(in->pBuffer), o, static_cast<int>(frames), settings::Current());
         else
         {
             std::memset(o, 0, static_cast<size_t>(frames) * m_bytesPerFrame);
-            m_proc.Process(o, o, static_cast<int>(frames));
+            m_proc.Process(o, o, static_cast<int>(frames), settings::Current());
             ++m_silentCalls;
         }
         float peak = m_peak;

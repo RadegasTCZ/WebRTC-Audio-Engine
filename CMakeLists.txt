@@ -19,6 +19,10 @@ add_library(voice_core STATIC
   third_party/webrtc/common_audio/third_party/ooura/fft_size_256/fft4g.cc
   src/VoiceProcessor.cpp
   src/VoiceProcessor.h
+  src/Settings.cpp
+  src/Settings.h
+  src/Log.cpp
+  src/Log.h
 )
 target_include_directories(voice_core PUBLIC third_party/webrtc/shim third_party/webrtc)
 target_compile_definitions(voice_core PUBLIC NOMINMAX _USE_MATH_DEFINES)
@@ -29,8 +33,6 @@ add_library(WebrtcVoiceApo SHARED
   src/DllMain.cpp
   src/ProbeApo.cpp
   src/ProbeApo.h
-  src/Log.cpp
-  src/Log.h
   src/Guids.h
   src/WebrtcVoiceApo.def
 )

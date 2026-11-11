@@ -1,6 +1,7 @@
 #include "ProbeApo.h"
 #include "Guids.h"
 #include "Log.h"
+#include "Settings.h"
 #include <new>
 
 namespace
@@ -84,5 +85,6 @@ _Check_return_ STDAPI DllGetClassObject(_In_ REFCLSID rclsid, _In_ REFIID riid, 
 
 __control_entrypoint(DllExport) STDAPI DllCanUnloadNow()
 {
-    return (CProbeApo::LiveObjects() == 0 && g_serverLocks == 0) ? S_OK : S_FALSE;
+    // The settings watcher (a thread-pool wait) lives for the whole process: never unload once started.
+    return (CProbeApo::LiveObjects() == 0 && g_serverLocks == 0 && !settings::WatcherStarted()) ? S_OK : S_FALSE;
 }

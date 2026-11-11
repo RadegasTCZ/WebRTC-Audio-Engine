@@ -9,13 +9,6 @@
 // MFX = bit-exact probe; EFX = NS appended to the OEM endpoint chain; Pack = NS as our own effect pack.
 enum class ApoSlot { MFX, EFX, Pack };
 
-// Settings read from HKLM\SOFTWARE\WebrtcVoiceApo at every LockForProcess (i.e. per stream start).
-struct ApoSettings
-{
-    DWORD nsLevel = 1;  // 0 = 6 dB, 1 = 12 dB (default, like the plugin), 2 = 18 dB, 3 = 21 dB
-    DWORD bypass = 0;   // 1 = pass audio through untouched (for A/B listening)
-    static ApoSettings Read() noexcept;
-};
 
 // Milestone 1, step 1: pass-through probe.
 // Audio is copied through untouched. Non-real-time callbacks log what the audio engine
