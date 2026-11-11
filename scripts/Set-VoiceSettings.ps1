@@ -38,17 +38,24 @@ $onOff = { param($v) if ($v -eq 'on') { 1 } else { 0 } }
 # AGC presets from the AEC3-Echo-Canceller plugin (headroom, max gain, speed, noise ceiling).
 $presets = @{ gentle = @(8, 20, 3, -60); normal = @(5, 30, 6, -50); strong = @(3, 50, 10, -45) }
 
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($path, $true)
 if (-not $k) {
-    # Create by full path (write-opening HKLM\SOFTWARE itself is refused) and let Users change values.
+    # Create by full path (write-opening HKLM\SOFTWARE itself is refused).
     $k = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($path)
+    Write-Host "Created HKLM\$path."
+}
+if ($isAdmin) {
+    # Who may change values: Users (settings app, scripts) and the audio engine account plus app
+    # containers (Windows Settings toggles our effects through the APO inside audiodg).
     $acl = $k.GetAccessControl()
-    $acl.AddAccessRule([System.Security.AccessControl.RegistryAccessRule]::new(
-        [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),   # BUILTIN\Users
-        [System.Security.AccessControl.RegistryRights]'QueryValues, SetValue, Notify, ReadKey',
-        [System.Security.AccessControl.AccessControlType]::Allow))
+    foreach ($sid in 'S-1-5-32-545', 'S-1-5-19', 'S-1-15-2-1', 'S-1-15-2-2') {   # Users, LOCAL SERVICE, ALL (RESTRICTED) APP PACKAGES
+        $acl.AddAccessRule([System.Security.AccessControl.RegistryAccessRule]::new(
+            [System.Security.Principal.SecurityIdentifier]::new($sid),
+            [System.Security.AccessControl.RegistryRights]'QueryValues, SetValue, Notify, ReadKey',
+            [System.Security.AccessControl.AccessControlType]::Allow))
+    }
     $k.SetAccessControl($acl)
-    Write-Host "Created HKLM\$path (Users may change values)."
 }
 $dw = { param($name, $val) $k.SetValue($name, [int]$val, 'DWord') }
 if ($PSBoundParameters.ContainsKey('Bypass'))  { & $dw 'Bypass' (& $onOff $Bypass) }

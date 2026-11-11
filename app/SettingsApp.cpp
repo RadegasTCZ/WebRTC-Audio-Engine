@@ -13,7 +13,7 @@ namespace
 {
     enum : int
     {
-        IDC_ENABLE = 100, IDC_AEC_ON, IDC_AEC_STRENGTH, IDC_NS_ON, IDC_NS_LEVEL, IDC_AGC_ON, IDC_AGC_PRESET,
+        IDC_FIRST = 100, IDC_AEC_ON, IDC_AEC_STRENGTH, IDC_NS_ON, IDC_NS_LEVEL, IDC_AGC_ON, IDC_AGC_PRESET,
         IDC_CLEANUP, IDC_LIM_ON, IDC_GAIN_MODE, IDC_DEFAULTS, IDC_SOUND_SETTINGS, IDC_STATUS, IDC_GAIN_NOTE
     };
 
@@ -60,15 +60,13 @@ namespace
         return 3;  // Custom
     }
 
+    // Turning everything off is Windows' own job (Audio enhancements: Off), so there is no master switch.
     void UpdateEnabledStates()
     {
-        const bool on = Checked(IDC_ENABLE);
-        for (int id : {IDC_AEC_ON, IDC_NS_ON, IDC_AGC_ON, IDC_CLEANUP, IDC_LIM_ON, IDC_GAIN_MODE})
-            EnableWindow(Item(id), on);
-        EnableWindow(Item(IDC_AEC_STRENGTH), on && Checked(IDC_AEC_ON));
-        EnableWindow(Item(IDC_NS_LEVEL), on && Checked(IDC_NS_ON));
-        EnableWindow(Item(IDC_AGC_PRESET), on && Checked(IDC_AGC_ON));
-        EnableWindow(Item(IDC_GAIN_MODE), on && !Checked(IDC_AGC_ON));
+        EnableWindow(Item(IDC_AEC_STRENGTH), Checked(IDC_AEC_ON));
+        EnableWindow(Item(IDC_NS_LEVEL), Checked(IDC_NS_ON));
+        EnableWindow(Item(IDC_AGC_PRESET), Checked(IDC_AGC_ON));
+        EnableWindow(Item(IDC_GAIN_MODE), !Checked(IDC_AGC_ON));
         ShowWindow(Item(IDC_GAIN_NOTE), Checked(IDC_AGC_ON) ? SW_SHOW : SW_HIDE);
     }
 
@@ -77,7 +75,6 @@ namespace
         g_updating = true;
         g_current = Settings::ReadFromRegistry();
         const Settings& s = g_current;
-        SetChecked(IDC_ENABLE, !s.bypass);
         SetChecked(IDC_AEC_ON, s.aecEnabled);
         SetSel(IDC_AEC_STRENGTH, static_cast<int>(s.aecStrength));
         SetChecked(IDC_NS_ON, s.nsEnabled);
@@ -101,7 +98,6 @@ namespace
         if (g_updating)
             return;
         Settings s = Settings::ReadFromRegistry();  // keep values the window does not show (frequencies, AGC details)
-        s.bypass = Checked(IDC_ENABLE) ? 0u : 1u;
         s.aecEnabled = Checked(IDC_AEC_ON);
         s.aecStrength = static_cast<uint32_t>(Sel(IDC_AEC_STRENGTH));
         s.nsEnabled = Checked(IDC_NS_ON);
@@ -132,13 +128,11 @@ namespace
     void BuildUi()
     {
         int y = 12;
-        Ctl(L"STATIC", L"Choose \"WebRTC Audio Engine\" for your microphone under Sound settings > "
-                       L"(microphone) > Audio enhancements.", SS_LEFT, 16, y, 368, 32, 0);
+        Ctl(L"STATIC", L"Choose \"WebRTC Audio Engine\" under Sound settings > (microphone) > "
+                       L"Audio enhancements. Choosing \"Off\" there turns all processing off.", SS_LEFT, 16, y, 368, 32, 0);
         y += 36;
         Ctl(L"BUTTON", L"Open sound settings", BS_PUSHBUTTON, 16, y, 150, 26, IDC_SOUND_SETTINGS);
         y += 40;
-        Ctl(L"BUTTON", L"Voice processing enabled", BS_AUTOCHECKBOX, 16, y, 300, 22, IDC_ENABLE, true);
-        y += 34;
 
         auto section = [&](const wchar_t* title, int height) {
             Ctl(L"BUTTON", title, BS_GROUPBOX, 16, y, 368, height, 0, true);
@@ -194,11 +188,13 @@ namespace
                 ShellExecuteW(hwnd, L"open", L"ms-settings:sound", nullptr, nullptr, SW_SHOWNORMAL);
             else if (id == IDC_DEFAULTS)
             {
-                const LONG err = Settings::WriteToRegistry(Settings{});
+                Settings d{};
+                d.bypass = 0;  // defaults also clear a scripted A/B bypass
+                const LONG err = Settings::WriteToRegistry(d);
                 LoadUi();
                 Status(err == ERROR_SUCCESS ? L"Defaults restored." : L"Could not save settings.");
             }
-            else if ((code == BN_CLICKED && id >= IDC_ENABLE) || code == CBN_SELCHANGE)
+            else if ((code == BN_CLICKED && id > IDC_FIRST) || code == CBN_SELCHANGE)
                 SaveFromUi(id);
             return 0;
         }
@@ -248,7 +244,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     g_bold = CreateFontIndirectW(&bold);
 
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc{0, 0, S(400), S(640)};
+    RECT rc{0, 0, S(400), S(606)};
     AdjustWindowRectExForDpi(&rc, style, FALSE, 0, g_dpi);
     g_wnd = CreateWindowExW(0, wc.lpszClassName, L"WebRTC Audio Engine Settings", style, CW_USEDEFAULT, CW_USEDEFAULT,
                             rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);

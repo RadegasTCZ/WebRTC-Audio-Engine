@@ -6,6 +6,8 @@
 #include <audiomediatype.h>
 #include <string>
 #include <cwctype>
+#include <algorithm>
+#include <vector>
 #include <ksmedia.h>
 #include <cstring>
 #include <cmath>
@@ -571,18 +573,75 @@ STDMETHODIMP_(void) CProbeApo::AcceptInput(DWORD dwInputId, const APO_CONNECTION
 
 // ---------------------------------------------------------------- IAudioSystemEffects3
 
-STDMETHODIMP CProbeApo::GetControllableSystemEffectsList(AUDIO_SYSTEMEFFECT** effects, UINT* numEffects, HANDLE)
+// Windows Settings > Sound > (mic) > Audio enhancements lists an effect pack's controllable effects
+// (like Voice Clarity's "Voice Focus"). We expose AEC, NS and AGC as the standard effect types; their
+// on/off state lives in our settings key, so Windows Settings, our app and the scripts stay in sync.
+namespace
+{
+    constexpr GUID kEffectAec = {0x6f64adbe, 0x8211, 0x11e2, {0x8c, 0x70, 0x2c, 0x27, 0xd7, 0xf0, 0x01, 0xfa}};  // ACOUSTIC_ECHO_CANCELLATION
+    constexpr GUID kEffectNs = {0x6f64adbf, 0x8211, 0x11e2, {0x8c, 0x70, 0x2c, 0x27, 0xd7, 0xf0, 0x01, 0xfa}};   // NOISE_SUPPRESSION
+    constexpr GUID kEffectAgc = {0x6f64adc0, 0x8211, 0x11e2, {0x8c, 0x70, 0x2c, 0x27, 0xd7, 0xf0, 0x01, 0xfa}};  // AUTOMATIC_GAIN_CONTROL
+
+    // Events handed to us by GetControllableSystemEffectsList: signalled when our effect states change.
+    SRWLOCK g_fxEventsLock = SRWLOCK_INIT;
+    std::vector<HANDLE>* g_fxEvents = nullptr;
+}
+
+void SignalSystemEffectsChanged() noexcept
+{
+    // Called on the settings watcher thread (after VoiceProcessor rebuilds stages) and after
+    // SetAudioSystemEffectState.
+    AcquireSRWLockShared(&g_fxEventsLock);
+    if (g_fxEvents)
+        for (HANDLE e : *g_fxEvents) SetEvent(e);
+    ReleaseSRWLockShared(&g_fxEventsLock);
+}
+
+STDMETHODIMP CProbeApo::GetControllableSystemEffectsList(AUDIO_SYSTEMEFFECT** effects, UINT* numEffects, HANDLE event)
 {
     if (!effects || !numEffects)
         return E_POINTER;
     *effects = nullptr;
     *numEffects = 0;
+    const Settings s = Settings::ReadFromRegistry();
+    auto* list = static_cast<AUDIO_SYSTEMEFFECT*>(CoTaskMemAlloc(3 * sizeof(AUDIO_SYSTEMEFFECT)));
+    if (!list)
+        return E_OUTOFMEMORY;
+    auto state = [](uint32_t on) { return on ? AUDIO_SYSTEMEFFECT_STATE_ON : AUDIO_SYSTEMEFFECT_STATE_OFF; };
+    list[0] = {kEffectAec, TRUE, state(s.aecEnabled)};
+    list[1] = {kEffectNs, TRUE, state(s.nsEnabled)};
+    list[2] = {kEffectAgc, TRUE, state(s.agcEnabled)};
+    *effects = list;
+    *numEffects = 3;
+    if (event)
+    {
+        AcquireSRWLockExclusive(&g_fxEventsLock);
+        if (!g_fxEvents) g_fxEvents = new std::vector<HANDLE>();
+        if (std::find(g_fxEvents->begin(), g_fxEvents->end(), event) == g_fxEvents->end())
+            g_fxEvents->push_back(event);
+        ReleaseSRWLockExclusive(&g_fxEventsLock);
+        if (!m_fxEvent) m_fxEvent = event;
+    }
+    apolog::Write(L"[%s #%ld] GetControllableSystemEffectsList -> AEC=%u NS=%u AGC=%u (event=%p)", SlotName(), m_instanceId,
+                  s.aecEnabled, s.nsEnabled, s.agcEnabled, event);
     return S_OK;
 }
 
-STDMETHODIMP CProbeApo::SetAudioSystemEffectState(GUID, AUDIO_SYSTEMEFFECT_STATE)
+STDMETHODIMP CProbeApo::SetAudioSystemEffectState(GUID effectId, AUDIO_SYSTEMEFFECT_STATE state)
 {
-    return E_NOTFOUND;  // we expose no controllable effects
+    Settings s = Settings::ReadFromRegistry();
+    const uint32_t on = state == AUDIO_SYSTEMEFFECT_STATE_ON ? 1u : 0u;
+    const wchar_t* name = L"?";
+    if (IsEqualGUID(effectId, kEffectAec)) { s.aecEnabled = on; name = L"AEC"; }
+    else if (IsEqualGUID(effectId, kEffectNs)) { s.nsEnabled = on; name = L"NS"; }
+    else if (IsEqualGUID(effectId, kEffectAgc)) { s.agcEnabled = on; name = L"AGC"; }
+    else return E_NOTFOUND;
+    settings::Publish(s);                         // takes effect right away in this process
+    const LONG err = Settings::WriteToRegistry(s); // persists + reaches the settings app
+    apolog::Write(L"[%s #%ld] SetAudioSystemEffectState %s -> %s (registry write %ld)", SlotName(), m_instanceId, name,
+                  on ? L"ON" : L"OFF", err);
+    SignalSystemEffectsChanged();
+    return S_OK;
 }
 
 // ---------------------------------------------------------------- Mic volume slider (notifications)

@@ -11,6 +11,9 @@
 // MFX = bit-exact probe; EFX = NS appended to the OEM endpoint chain; Pack = NS as our own effect pack.
 enum class ApoSlot { MFX, EFX, Pack };
 
+// Signals Windows (Settings > Audio enhancements) that our controllable effect states changed.
+void SignalSystemEffectsChanged() noexcept;
+
 
 // Milestone 1, step 1: pass-through probe.
 // Audio is copied through untouched. Non-real-time callbacks log what the audio engine
@@ -117,6 +120,8 @@ private:
     float m_refRate = 0.0f;
     bool m_refFloat = false;
     std::atomic<uint64_t> m_refFrames{0}, m_refCalls{0}, m_refDropped{0}, m_refSilentCalls{0};
+
+    HANDLE m_fxEvent = nullptr;   // from GetControllableSystemEffectsList (owned by the engine)
 
     // Cached at LockForProcess (never changes while locked).
     UINT32 m_bytesPerFrame = 0;

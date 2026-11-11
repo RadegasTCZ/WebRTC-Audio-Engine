@@ -94,6 +94,9 @@ void VoiceProcessor::Unregister()
     ReleaseSRWLockExclusive(&g_registryLock);
 }
 
+// Optional extra hook (set by the APO DLL): runs after the stage rebuilds, e.g. to notify Windows Settings.
+void (*g_afterSettingsChanged)() noexcept = nullptr;
+
 void VoiceProcessor::OnSettingsChanged(const Settings& s)
 {
     AcquireSRWLockExclusive(&g_registryLock);  // held while rebuilding, so no processor can be destroyed meanwhile
@@ -101,6 +104,8 @@ void VoiceProcessor::OnSettingsChanged(const Settings& s)
         for (VoiceProcessor* p : *g_registry)
             p->RequestStageParams(s);
     ReleaseSRWLockExclusive(&g_registryLock);
+    if (g_afterSettingsChanged)
+        g_afterSettingsChanged();
 }
 
 void VoiceProcessor::RequestStageParams(const Settings& s)

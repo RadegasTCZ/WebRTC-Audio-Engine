@@ -62,10 +62,15 @@ namespace
     ClassFactory g_factoryPack(ApoSlot::Pack);
 }
 
+extern void (*g_afterSettingsChanged)() noexcept;
+
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH)
+    {
         DisableThreadLibraryCalls(module);
+        g_afterSettingsChanged = &SignalSystemEffectsChanged;  // keep Windows Settings in sync with our settings
+    }
     return TRUE;
 }
 
