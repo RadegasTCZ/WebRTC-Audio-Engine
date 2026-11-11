@@ -2,6 +2,9 @@
 #include "Guids.h"
 #include "Log.h"
 #include <functiondiscoverykeys_devpkey.h>
+#include <endpointvolume.h>
+#include <string>
+#include <cwctype>
 #include <ksmedia.h>
 #include <cstring>
 #include <cmath>
@@ -55,6 +58,8 @@ CProbeApo::CProbeApo(ApoSlot slot, IUnknown* outer) noexcept
 
 CProbeApo::~CProbeApo()
 {
+    if (m_device)
+        m_device->Release();
     apolog::Write(L"[%s #%ld] destroyed", SlotName(), m_instanceId);
     --s_liveObjects;
 }
@@ -87,6 +92,10 @@ HRESULT CProbeApo::NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcept
         *ppv = static_cast<IAudioSystemEffects*>(this);
     else if (riid == __uuidof(IAudioSystemEffects2))
         *ppv = static_cast<IAudioSystemEffects2*>(this);
+    else if (riid == __uuidof(IAudioSystemEffects3) && m_slot == ApoSlot::Pack)
+        *ppv = static_cast<IAudioSystemEffects3*>(this);
+    else if (riid == __uuidof(IAudioProcessingObjectNotifications) && m_slot == ApoSlot::Pack)
+        *ppv = static_cast<IAudioProcessingObjectNotifications*>(this);
     else
     {
         // Useful for discovery: shows which optional interfaces (CAPX, AEC, ...) the engine asks for.
@@ -106,22 +115,41 @@ STDMETHODIMP CProbeApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
     if (cbDataSize > 0 && !pbyData)
         return E_POINTER;
 
-    const APOInitSystemEffects* v1 = nullptr;
-    const APOInitSystemEffects2* v2 = nullptr;
-    if (cbDataSize == sizeof(APOInitSystemEffects2))
+    // Three possible init structures; pull the common fields out of whichever we got.
+    const wchar_t* initKind = L"other";
+    IPropertyStore* endpointProps = nullptr;
+    IMMDeviceCollection* collection = nullptr;
+    UINT ioIndex = 0;
+    BOOL discoveryOnly = -1;
+    if (cbDataSize == sizeof(APOInitSystemEffects3))
     {
-        v2 = reinterpret_cast<const APOInitSystemEffects2*>(pbyData);
+        const auto* v3 = reinterpret_cast<const APOInitSystemEffects3*>(pbyData);
+        initKind = L"APOInitSystemEffects3";
+        endpointProps = v3->pAPOEndpointProperties;
+        collection = v3->pDeviceCollection;
+        ioIndex = v3->nSoftwareIoDeviceInCollection;
+        m_mode = v3->AudioProcessingMode;
+        discoveryOnly = v3->InitializeForDiscoveryOnly;
+    }
+    else if (cbDataSize == sizeof(APOInitSystemEffects2))
+    {
+        const auto* v2 = reinterpret_cast<const APOInitSystemEffects2*>(pbyData);
+        initKind = L"APOInitSystemEffects2";
+        endpointProps = v2->pAPOEndpointProperties;
+        collection = v2->pDeviceCollection;
+        ioIndex = v2->nSoftwareIoDeviceInCollection;
         m_mode = v2->AudioProcessingMode;
+        discoveryOnly = v2->InitializeForDiscoveryOnly;
     }
     else if (cbDataSize == sizeof(APOInitSystemEffects))
     {
-        v1 = reinterpret_cast<const APOInitSystemEffects*>(pbyData);
+        initKind = L"APOInitSystemEffects";
+        endpointProps = reinterpret_cast<const APOInitSystemEffects*>(pbyData)->pAPOEndpointProperties;
     }
 
     // Endpoint name + id, for confirming which mic we sit on.
     wchar_t endpointName[256] = L"?";
     wchar_t endpointId[256] = L"?";
-    IPropertyStore* endpointProps = v2 ? v2->pAPOEndpointProperties : (v1 ? v1->pAPOEndpointProperties : nullptr);
     if (endpointProps)
     {
         PROPVARIANT pv;
@@ -130,27 +158,48 @@ STDMETHODIMP CProbeApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
             wcsncpy_s(endpointName, pv.pwszVal, _TRUNCATE);
         PropVariantClear(&pv);
     }
-    if (v2 && v2->pDeviceCollection)
+    wchar_t mmEndpointId[128] = L"?";
+    if (collection)
     {
+        // Software IO device (the KS filter): its id tells us the bus (hdaudio#..., usb#..., bth...).
         IMMDevice* dev = nullptr;
-        if (SUCCEEDED(v2->pDeviceCollection->Item(v2->nSoftwareIoDeviceInCollection, &dev)) && dev)
+        if (SUCCEEDED(collection->Item(ioIndex, &dev)) && dev)
         {
             LPWSTR id = nullptr;
             if (SUCCEEDED(dev->GetId(&id)) && id)
             {
                 wcsncpy_s(endpointId, id, _TRUNCATE);
+                std::wstring lower(id);
+                for (auto& ch : lower) ch = static_cast<wchar_t>(towlower(ch));
+                m_hardwareVolumeBus = lower.find(L"usb#") != std::wstring::npos || lower.find(L"usb\\") != std::wstring::npos ||
+                                      lower.find(L"bth") != std::wstring::npos || lower.find(L"bluetooth") != std::wstring::npos;
                 CoTaskMemFree(id);
             }
             dev->Release();
+        }
+        // The audio endpoint itself is the last device in the collection (Windows 11 APO docs).
+        UINT count = 0;
+        if (SUCCEEDED(collection->GetCount(&count)) && count > 0)
+        {
+            if (m_device) { m_device->Release(); m_device = nullptr; }
+            if (SUCCEEDED(collection->Item(count - 1, &m_device)) && m_device)
+            {
+                LPWSTR id = nullptr;
+                if (SUCCEEDED(m_device->GetId(&id)) && id)
+                {
+                    wcsncpy_s(mmEndpointId, id, _TRUNCATE);
+                    CoTaskMemFree(id);
+                }
+            }
         }
     }
 
     wchar_t modeGuid[40];
     apolog::GuidToString(m_mode, modeGuid);
-    apolog::Write(L"[%s #%ld] Initialize cb=%u (%s) mode=%s %s discoveryOnly=%d endpoint=\"%s\" id=%s",
-                  SlotName(), m_instanceId, cbDataSize,
-                  v2 ? L"APOInitSystemEffects2" : (v1 ? L"APOInitSystemEffects" : L"other"),
-                  ModeName(m_mode), modeGuid, v2 ? v2->InitializeForDiscoveryOnly : -1, endpointName, endpointId);
+    apolog::Write(L"[%s #%ld] Initialize cb=%u (%s) mode=%s %s discoveryOnly=%d endpoint=\"%s\" mmdevice=%s io=%s hwVolumeBus=%d",
+                  SlotName(), m_instanceId, cbDataSize, initKind,
+                  ModeName(m_mode), modeGuid, discoveryOnly, endpointName, mmEndpointId, endpointId,
+                  m_hardwareVolumeBus ? 1 : 0);
 
     m_bIsInitialized = true;
     return S_OK;
@@ -242,6 +291,22 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
 
     // Voice processing runs in the EFX and in the effect pack; the plain MFX stays a pure probe.
     m_proc.Deactivate();
+    if (m_slot == ApoSlot::Pack && m_device)
+    {
+        // Starting slider position (notifications only arrive on changes).
+        IAudioEndpointVolume* ev = nullptr;
+        HRESULT hrv = m_device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&ev));
+        float db = 0.0f;
+        if (SUCCEEDED(hrv) && ev)
+        {
+            hrv = ev->GetMasterVolumeLevel(&db);
+            ev->Release();
+        }
+        if (SUCCEEDED(hrv))
+            m_sliderDb.store(db, std::memory_order_relaxed);
+        apolog::Write(L"[%s #%ld] initial slider: hr=0x%08X %.2f dB, hwVolumeBus=%d", SlotName(), m_instanceId, hrv, db,
+                      m_hardwareVolumeBus ? 1 : 0);
+    }
     if (m_slot != ApoSlot::MFX)
     {
         settings::EnsureWatcher();  // live settings (non-RT here)
@@ -304,12 +369,14 @@ STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CON
     {
         // NS keeps a continuous timeline: silent buffers are fed as zeros so the FIFO stays in step.
         float* o = reinterpret_cast<float*>(out->pBuffer);
+        const Settings cur = settings::Current();
+        const float gainDb = SliderGainDb(cur);
         if (in->u32BufferFlags == BUFFER_VALID)
-            m_proc.Process(reinterpret_cast<const float*>(in->pBuffer), o, static_cast<int>(frames), settings::Current());
+            m_proc.Process(reinterpret_cast<const float*>(in->pBuffer), o, static_cast<int>(frames), cur, gainDb);
         else
         {
             std::memset(o, 0, static_cast<size_t>(frames) * m_bytesPerFrame);
-            m_proc.Process(o, o, static_cast<int>(frames), settings::Current());
+            m_proc.Process(o, o, static_cast<int>(frames), cur, gainDb);
             ++m_silentCalls;
         }
         float peak = m_peak;
@@ -353,6 +420,72 @@ STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CON
 
     out->u32ValidFrameCount = frames;
     out->u32BufferFlags = in->u32BufferFlags;
+}
+
+// ---------------------------------------------------------------- IAudioSystemEffects3
+
+STDMETHODIMP CProbeApo::GetControllableSystemEffectsList(AUDIO_SYSTEMEFFECT** effects, UINT* numEffects, HANDLE)
+{
+    if (!effects || !numEffects)
+        return E_POINTER;
+    *effects = nullptr;
+    *numEffects = 0;
+    return S_OK;
+}
+
+STDMETHODIMP CProbeApo::SetAudioSystemEffectState(GUID, AUDIO_SYSTEMEFFECT_STATE)
+{
+    return E_NOTFOUND;  // we expose no controllable effects
+}
+
+// ---------------------------------------------------------------- Mic volume slider (notifications)
+
+float CProbeApo::SliderGainDb(const Settings& s) const noexcept
+{
+    if (m_slot != ApoSlot::Pack)   // in the OEM chain the OEM applies the slider itself
+        return 0.0f;
+    const bool apply = s.gainMode == 1 || (s.gainMode == 0 && !m_hardwareVolumeBus);
+    return apply ? m_sliderDb.load(std::memory_order_relaxed) : 0.0f;
+}
+
+STDMETHODIMP CProbeApo::GetApoNotificationRegistrationInfo(APO_NOTIFICATION_DESCRIPTOR** apoNotifications, DWORD* count)
+{
+    if (!apoNotifications || !count)
+        return E_POINTER;
+    *apoNotifications = nullptr;
+    *count = 0;
+    if (!m_device)
+        return S_OK;  // nothing to register for
+    auto* d = static_cast<APO_NOTIFICATION_DESCRIPTOR*>(CoTaskMemAlloc(sizeof(APO_NOTIFICATION_DESCRIPTOR)));
+    if (!d)
+        return E_OUTOFMEMORY;
+    ZeroMemory(d, sizeof(*d));
+    d->type = APO_NOTIFICATION_TYPE_ENDPOINT_VOLUME2;   // carries the volume in dB
+    d->audioEndpointVolume.device = m_device;
+    m_device->AddRef();                                  // the caller releases it
+    *apoNotifications = d;
+    *count = 1;
+    apolog::Write(L"[%s #%ld] registered for endpoint volume notifications", SlotName(), m_instanceId);
+    return S_OK;
+}
+
+STDMETHODIMP_(void) CProbeApo::HandleNotification(APO_NOTIFICATION* n)
+{
+    if (!n)
+        return;
+    if (n->type == APO_NOTIFICATION_TYPE_ENDPOINT_VOLUME2 && n->audioEndpointVolumeChange2.volume)
+    {
+        const auto* v = n->audioEndpointVolumeChange2.volume;
+        const bool muted = v->notificationData && v->notificationData->bMuted;
+        m_sliderDb.store(v->masterVolumeInDb, std::memory_order_relaxed);
+        apolog::Write(L"[%s #%ld] slider %.2f dB (range %.1f..%.1f) muted=%d -> applying %.2f dB",
+                      SlotName(), m_instanceId, v->masterVolumeInDb, v->volumeMinInDb, v->volumeMaxInDb, muted ? 1 : 0,
+                      SliderGainDb(settings::Current()));
+    }
+    else if (n->type == APO_NOTIFICATION_TYPE_ENDPOINT_VOLUME && n->audioEndpointVolumeChange.volume)
+    {
+        apolog::Write(L"[%s #%ld] slider (v1) scalar %.3f", SlotName(), m_instanceId, n->audioEndpointVolumeChange.volume->fMasterVolume);
+    }
 }
 
 // ---------------------------------------------------------------- IAudioSystemEffects2

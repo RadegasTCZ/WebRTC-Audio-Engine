@@ -3,6 +3,7 @@
 #include <mmdeviceapi.h>
 #include <audioenginebaseapo.h>
 #include <baseaudioprocessingobject.h>
+#include <audioengineextensionapo.h>
 #include <atomic>
 #include "VoiceProcessor.h"
 
@@ -13,7 +14,7 @@ enum class ApoSlot { MFX, EFX, Pack };
 // Milestone 1, step 1: pass-through probe.
 // Audio is copied through untouched. Non-real-time callbacks log what the audio engine
 // tells us (slot, processing mode, endpoint, format); APOProcess only updates counters.
-class CProbeApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects2
+class CProbeApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects3, public IAudioProcessingObjectNotifications
 {
 public:
     // The audio engine creates APOs AGGREGATED (pUnkOuter != null), so we implement the
@@ -48,6 +49,15 @@ public:
     // IAudioSystemEffects2
     STDMETHOD(GetEffectsList)(LPGUID* ppEffectsIds, UINT* pcEffects, HANDLE Event) override;
 
+    // IAudioSystemEffects3 (Windows 11 "CAPX"; the engine then uses APOInitSystemEffects3 and
+    // delivers APO notifications). We expose no Windows-controllable sub-effects.
+    STDMETHOD(GetControllableSystemEffectsList)(AUDIO_SYSTEMEFFECT** effects, UINT* numEffects, HANDLE event) override;
+    STDMETHOD(SetAudioSystemEffectState)(GUID effectId, AUDIO_SYSTEMEFFECT_STATE state) override;
+
+    // IAudioProcessingObjectNotifications (Windows 11): endpoint volume -> software slider gain
+    STDMETHOD(GetApoNotificationRegistrationInfo)(APO_NOTIFICATION_DESCRIPTOR** apoNotifications, DWORD* count) override;
+    STDMETHOD_(void, HandleNotification)(APO_NOTIFICATION* apoNotification) override;
+
     static long LiveObjects() noexcept { return s_liveObjects.load(); }
 
 private:
@@ -77,8 +87,15 @@ private:
     const long m_instanceId;
     GUID m_mode{};
 
-    // Noise suppression (EFX only). Prepared in LockForProcess, used in APOProcess.
+    // Voice processing (EFX and Pack). Prepared in LockForProcess, used in APOProcess.
     VoiceProcessor m_proc;
+
+    // Mic volume slider: the pack replaces the OEM chain, which on laptop codecs applied the slider
+    // in software. We apply it ourselves unless the device's volume is in hardware (USB/Bluetooth).
+    IMMDevice* m_device = nullptr;       // our endpoint (from Initialize), for notifications
+    bool m_hardwareVolumeBus = false;    // USB / Bluetooth endpoint
+    std::atomic<float> m_sliderDb{0.0f};
+    float SliderGainDb(const Settings& s) const noexcept;
 
     // Cached at LockForProcess (never changes while locked).
     UINT32 m_bytesPerFrame = 0;

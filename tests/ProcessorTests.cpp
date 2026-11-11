@@ -150,6 +150,38 @@ int main()
     for (size_t i = 1000; i < 1100; ++i) bad[i] = (i % 2) ? NAN : INFINITY;
     EXPECT(AllFinite(Run(bad, {480}, def)), "non-finite output");
 
+    std::printf("[8b] input gain (slider): +12 dB and -6 dB applied, changes ramp without clicks (NS/HPF off)\n");
+    {
+        Settings plain = def; plain.nsEnabled = 0; plain.hpfEnabled = 0;
+        auto t = Sine(frames, 1000.0f, 0.05f);
+        for (float g : {12.0f, -6.0f})
+        {
+            VoiceProcessor vp; vp.Prepare(kCh, 48000, plain);
+            std::vector<float> y(t.size());
+            vp.Process(t.data(), y.data(), frames, plain, g);
+            const double got = RmsDb(y, half, y.size()) - RmsDb(t, half, t.size());
+            std::printf("    requested %+.0f dB -> measured %+.2f dB\n", g, got);
+            EXPECT(std::fabs(got - g) < 0.1, "gain %.0f dB measured %.2f", g, got);
+        }
+        // Slider moves every 10 periods between -17 and +30 dB: must stay click-free.
+        VoiceProcessor vp; vp.Prepare(kCh, 48000, plain);
+        std::vector<float> y(t.size());
+        int pos = 0, k = 0;
+        while (pos < frames)
+        {
+            const int n = std::min(441, frames - pos);
+            const float g = ((k++ / 10) % 2) ? 30.0f : -17.0f;
+            vp.Process(t.data() + static_cast<size_t>(pos) * kCh, y.data() + static_cast<size_t>(pos) * kCh, n, plain, g);
+            pos += n;
+        }
+        float step = 0;
+        for (size_t i = static_cast<size_t>(kLat + 4800) * kCh + kCh; i < y.size(); i += kCh)
+            step = std::max(step, std::fabs(y[i] - y[i - kCh]));
+        const float maxSlope = 0.05f * 31.6f * 2.0f * 3.14159265f * 1000.0f / 48000.0f;  // tone at +30 dB
+        std::printf("    slider jumps -17 <-> +30 dB: largest step %.4f (tone at +30 dB max %.4f)\n", step, maxSlope);
+        EXPECT(step < 1.5f * maxSlope && AllFinite(y), "slider change clicks");
+    }
+
     std::printf("[9] unsupported formats stay inactive\n");
     VoiceProcessor p;
     EXPECT(!p.Prepare(2, 4000, def) && !p.IsActive(), "4 kHz should be refused");

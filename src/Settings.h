@@ -13,6 +13,8 @@ struct Settings
     uint32_t hpfHz = 80;        // 20..300
     uint32_t nsEnabled = 1;     // WebRTC noise suppression
     uint32_t nsLevel = 1;       // 0 = 6 dB, 1 = 12 dB, 2 = 18 dB, 3 = 21 dB
+    uint32_t gainMode = 0;      // mic volume slider in software (effect pack only):
+                                // 0 = auto (not for USB/Bluetooth, whose volume is in hardware), 1 = always, 2 = never
 
     bool operator==(const Settings&) const = default;
 

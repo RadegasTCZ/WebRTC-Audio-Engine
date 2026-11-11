@@ -48,7 +48,9 @@ public:
 
     // Interleaved float32. in and out may be the same buffer (in-place).
     // `s` is applied at the next 10 ms block boundary.
-    void Process(const float* in, float* out, int frames, const Settings& s) noexcept;
+    // inputGainDb: software gain after the HPF (the mic volume slider when we replace the OEM chain);
+    // ramped over one block when it changes. 0 dB = untouched.
+    void Process(const float* in, float* out, int frames, const Settings& s, float inputGainDb = 0.0f) noexcept;
 
 private:
     struct Resampling;
@@ -72,6 +74,10 @@ private:
         float At(int i) const noexcept { return current + (target - current) * (static_cast<float>(i + 1) / kBlock); }
         void Finish() noexcept { current = target; }
     };
+public:
+    // Chain is input gain -> HPF -> NS; bypass keeps the input gain (exposed for tests).
+    static float DbToLinear(float db) noexcept;
+private:
     struct Delay  // fixed kAlgorithmLatency delay over one block
     {
         std::array<float, kAlgorithmLatency> hist{};
@@ -99,4 +105,6 @@ private:
     int m_level = 1;         // active NS level
     int m_nextLevel = -1;    // level being crossfaded in this block, or -1
     Ramp m_hpfMix, m_nsMix, m_wet;   // 1 = stage on / chain active
+    float m_gainTargetDb = 0.0f;
+    Ramp m_gain{1.0f, 1.0f};         // linear input gain (slider)
 };

@@ -33,7 +33,7 @@ namespace
         const Settings old = settings::Current();
         settings::Publish(s);
         if (!(s == old))
-            apolog::Write(L"[settings] bypass=%u hpf=%u@%uHz ns=%u level=%u", s.bypass, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel);
+            apolog::Write(L"[settings] bypass=%u hpf=%u@%uHz ns=%u level=%u gainMode=%u", s.bypass, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel, s.gainMode);
         Arm();
     }
 }
@@ -51,6 +51,8 @@ Settings Settings::ReadFromRegistry() noexcept
     read(L"HpfHz", s.hpfHz);
     read(L"NsEnabled", s.nsEnabled);
     read(L"NsLevel", s.nsLevel);
+    read(L"GainMode", s.gainMode);
+    if (s.gainMode > 2) s.gainMode = 0;
 
     s.bypass = s.bypass ? 1u : 0u;
     s.hpfEnabled = s.hpfEnabled ? 1u : 0u;

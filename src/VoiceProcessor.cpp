@@ -89,6 +89,11 @@ float VoiceProcessor::Biquad::Run(float x) noexcept
     return y;
 }
 
+float VoiceProcessor::DbToLinear(float db) noexcept
+{
+    return std::pow(10.0f, std::clamp(db, -60.0f, 40.0f) / 20.0f);
+}
+
 void VoiceProcessor::Delay::Run(const float* in, float* out) noexcept
 {
     constexpr int L = kAlgorithmLatency;
@@ -224,6 +229,7 @@ void VoiceProcessor::Reset() noexcept
     m_hpfMix.current = m_hpfMix.target = m_settings.hpfEnabled ? 1.0f : 0.0f;
     m_nsMix.current = m_nsMix.target = m_settings.nsEnabled ? 1.0f : 0.0f;
     m_wet.current = m_wet.target = m_settings.bypass ? 0.0f : 1.0f;
+    m_gain.current = m_gain.target = DbToLinear(m_gainTargetDb);
     ApplySettings(m_settings);
 }
 
@@ -253,9 +259,14 @@ void VoiceProcessor::ProcessBlock() noexcept
 {
     for (auto& c : m_ch)
     {
-        // Sanitize once at the input: nothing non-finite enters any filter state.
-        for (float& x : c.in)
-            if (!std::isfinite(x)) x = 0.0f;
+        // Sanitize once at the input: nothing non-finite enters any filter state. Then apply the
+        // input gain (mic volume slider) first, so it also applies when bypassed: bypass means
+        // "no processing", not "ignore the volume control".
+        for (int i = 0; i < kBlock; ++i)
+        {
+            const float x = c.in[i];
+            c.in[i] = (std::isfinite(x) ? x : 0.0f) * m_gain.At(i);
+        }
 
         // 1. High-pass filter (always runs; mixed by its on/off ramp).
         for (int i = 0; i < kBlock; ++i)
@@ -295,10 +306,16 @@ void VoiceProcessor::ProcessBlock() noexcept
     m_hpfMix.Finish();
     m_nsMix.Finish();
     m_wet.Finish();
+    m_gain.Finish();
 }
 
-void VoiceProcessor::Process(const float* in, float* out, int frames, const Settings& s) noexcept
+void VoiceProcessor::Process(const float* in, float* out, int frames, const Settings& s, float inputGainDb) noexcept
 {
+    if (inputGainDb != m_gainTargetDb)
+    {
+        m_gainTargetDb = inputGainDb;
+        m_gain.target = DbToLinear(inputGainDb);  // picked up by the next block's ramp
+    }
     if (!m_active)
     {
         if (in != out)

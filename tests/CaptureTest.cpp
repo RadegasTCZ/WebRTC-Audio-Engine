@@ -50,6 +50,10 @@ int wmain(int argc, wchar_t** argv)
         vol->SetMasterVolumeLevelScalar(v, nullptr);
         float db = 0; vol->GetMasterVolumeLevel(&db);
         std::printf("Slider set to %.0f%% (%.1f dB), was %.0f%%\n", v * 100, db, oldVol * 100);
+        DWORD hw = 0; vol->QueryHardwareSupport(&hw);
+        float mn = 0, mx = 0, inc = 0; vol->GetVolumeRange(&mn, &mx, &inc);
+        std::printf("QueryHardwareSupport=0x%lX (VOLUME=%d MUTE=%d METER=%d), range %.1f..%.1f dB step %.2f\n", hw,
+                    (hw & ENDPOINT_HARDWARE_SUPPORT_VOLUME) != 0, (hw & ENDPOINT_HARDWARE_SUPPORT_MUTE) != 0, (hw & ENDPOINT_HARDWARE_SUPPORT_METER) != 0, mn, mx, inc);
         Sleep(200);
     }
 
