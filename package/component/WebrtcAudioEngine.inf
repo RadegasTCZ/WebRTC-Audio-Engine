@@ -8,7 +8,7 @@ Signature   = "$WINDOWS NT$"
 Class       = AudioProcessingObject
 ClassGuid   = {5989fce8-9cd0-467d-8a6a-5419e31529d4}
 Provider    = %ProviderName%
-DriverVer   = 11/11/2026,0.1.0.0
+DriverVer   = 11/11/2026,0.3.0.0
 CatalogFile = WebrtcAudioEngine.cat
 PnpLockDown = 1
 
@@ -19,6 +19,7 @@ PnpLockDown = 1
 %Apo.ComponentDesc% = WebrtcEngine_Install, SWC\VEN_WRTC&AUDIO_EFFECTPACK_WEBRTCENGINE
 
 [WebrtcEngine_Install.NTamd64]
+DelReg    = WebrtcEngine_DelReg
 AddReg    = WebrtcEngine_AddReg
 CopyFiles = WebrtcEngine_CopyFiles
 
@@ -27,6 +28,13 @@ WebrtcVoiceApo.dll
 
 [WebrtcEngine_Install.NTamd64.Services]
 AddService = ,2    ; no function driver, install a null driver
+
+[WebrtcEngine_DelReg]
+; Updates merge registry values, so drop placements from older versions of this package
+; (0.2.x registered an endpoint effect, which effect packs ignore). DelReg runs before AddReg.
+HKR,EffectPackRegistration\%EFFECT_PACK_ID%\FxProperties,%PKEY_FX_EndpointEffectClsid%
+HKR,EffectPackRegistration\%EFFECT_PACK_ID%\FxProperties,%PKEY_CompositeFX_EndpointEffectClsid%
+HKR,EffectPackRegistration\%EFFECT_PACK_ID%\FxProperties,%PKEY_EFX_ProcessingModes_Supported_For_Streaming%
 
 [WebrtcEngine_AddReg]
 ; APO COM registration (in the package's own registry key, like Voice Clarity)
@@ -59,6 +67,10 @@ HKR,EffectPackRegistration\%EFFECT_PACK_ID%,%PKEY_FX_VersionMinor%,%REG_DWORD%,1
 HKR,EffectPackRegistration\%EFFECT_PACK_ID%\FxProperties,%PKEY_FX_ApplyToCapture%,%REG_DWORD%,1
 HKR,EffectPackRegistration\%EFFECT_PACK_ID%\FxProperties,%PKEY_FX_Enumerator%,%REG_MULTI_SZ%,"*"
 HKR,EffectPackRegistration\%EFFECT_PACK_ID%\FxProperties,%PKEY_FX_Association%,%REG_MULTI_SZ%,%KSNODETYPE_MICROPHONE%,%KSNODETYPE_DESKTOP_MICROPHONE%,%KSNODETYPE_PERSONAL_MICROPHONE%,%KSNODETYPE_OMNI_DIRECTIONAL_MICROPHONE%,%KSNODETYPE_MICROPHONE_ARRAY%,%KSNODETYPE_PROCESSING_MICROPHONE_ARRAY%,%KSNODETYPE_HEADSET%,%KSNODETYPE_HFP_SIDEBAND_HEADSET%,%KSNODETYPE_ECHO_CANCELING_SPEAKERPHONE%,%KSNODETYPE_ECHO_SUPPRESSING_SPEAKERPHONE%,%KSNODETYPE_SPEAKERPHONE_NO_ECHO_REDUCTION%
+; Mode effect (MFX), like Voice Clarity. Measured on build 26300: a pack's EFX placement is
+; ignored (a pack without an MFX falls back to Device Default Effects), and RAW streams skip
+; the pack's MFX. Browsers using RAW run their own WebRTC processing. AEC (aux loopback input)
+; is only offered to a capture MFX, so this is also where AEC3 will live.
 HKR,EffectPackRegistration\%EFFECT_PACK_ID%\FxProperties,%PKEY_FX_ModeEffectClsid%,,%APO_CLSID%
 HKR,EffectPackRegistration\%EFFECT_PACK_ID%\FxProperties,%PKEY_CompositeFX_ModeEffectClsid%,%REG_MULTI_SZ%,%APO_CLSID%
 HKR,EffectPackRegistration\%EFFECT_PACK_ID%\FxProperties,%PKEY_MFX_ProcessingModes_Supported_For_Streaming%,%REG_MULTI_SZ%,%AUDIO_SIGNALPROCESSINGMODE_DEFAULT%,%AUDIO_SIGNALPROCESSINGMODE_COMMUNICATIONS%,%AUDIO_SIGNALPROCESSINGMODE_SPEECH%,%AUDIO_SIGNALPROCESSINGMODE_RAW%
@@ -104,6 +116,9 @@ PKEY_ItemNameDisplay                  = "{B725F130-47EF-101A-A5F1-02608C9EEBAC},
 PKEY_FX_Association                   = "{D04E05A6-594B-4fb6-A80D-01AF5EED7D1D},0"
 PKEY_FX_ModeEffectClsid               = "{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},6"
 PKEY_CompositeFX_ModeEffectClsid      = "{D04E05A6-594B-4fb6-A80D-01AF5EED7D1D},14"
+PKEY_FX_EndpointEffectClsid           = "{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},7"
+PKEY_CompositeFX_EndpointEffectClsid  = "{D04E05A6-594B-4fb6-A80D-01AF5EED7D1D},15"
+PKEY_EFX_ProcessingModes_Supported_For_Streaming = "{D3993A3F-99C2-4402-B5EC-A92A0367664B},7"
 PKEY_FX_Enumerator                    = "{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},23"
 PKEY_FX_VersionMajor                  = "{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},24"
 PKEY_FX_VersionMinor                  = "{D04E05A6-594B-4FB6-A80D-01AF5EED7D1D},25"
