@@ -128,8 +128,11 @@ namespace
 
     int Dpi() { return static_cast<int>(GetDpiForWindow(g_flyout)); }
     int S(int v) { return MulDiv(v, Dpi(), 96); }
-    constexpr int kWidth = 300, kPad = 14, kTitleH = 40, kRowH = 36, kMeterH = 30, kLinkH = 40;
-    int HeightDip() { return kTitleH + ROW_COUNT * kRowH + 10 + 2 * kMeterH + 24 + kLinkH; }
+    constexpr int kWidth = 300, kPad = 14, kTitleH = 40, kRowH = 36, kMeterH = 28, kDevNameH = 22, kStatusH = 22, kLinkH = 40;
+    int g_devices = 0;  // devices with live meters (refreshed by the timer)
+    // One block per active microphone: name, two meters, status. With none: a single status line.
+    int DeviceBlockH() { return kDevNameH + 2 * kMeterH + kStatusH; }
+    int HeightDip() { return kTitleH + ROW_COUNT * kRowH + 14 + (g_devices == 0 ? kStatusH + 6 : g_devices * (DeviceBlockH() + 6)) + kLinkH; }
 
     bool RowOn(const Settings& s, int row)
     {
@@ -236,26 +239,39 @@ namespace
             DrawSwitch(dc, r, RowOn(s, row), t);
         }
 
-        // Live meters
-        telemetry::Data d{};
-        const bool live = telemetry::Read(d, 1500);
+        // Live meters, one block per microphone that is in use with our effect pack.
+        telemetry::Device devs[telemetry::kMaxSlots];
+        const int n = telemetry::ReadAll(devs);
         int y = kTitleH + ROW_COUNT * kRowH + 14;
         SelectObject(dc, fontSmall);
-        const bool echoValid = live && d.aecRunning && s.aecEnabled;
-        wchar_t buf[32];
-        swprintf_s(buf, L"%.0f dB", std::max(0.0f, static_cast<float>(d.echoRemovedDb)));
-        DrawMeter(dc, y, L"Echo removed", d.echoRemovedDb, 40.0f, buf, t, echoValid);
-        y += kMeterH;
-        swprintf_s(buf, L"%+.0f dB", static_cast<float>(d.agcGainDb));
-        DrawMeter(dc, y, L"Automatic gain", d.agcGainDb, 30.0f, buf, t, live && s.agcEnabled);
-        y += kMeterH;
-        RECT status{S(kPad), S(y), S(kWidth - kPad), S(y + 20)};
-        SetTextColor(dc, t.subtle);
-        const wchar_t* msg = !live                     ? L"No app is using the microphone right now."
-                             : !d.aecRunning           ? L"This recording has no echo reference."
-                             : d.referenceDbfs < -70.0f ? L"Echo cancellation ready (nothing playing)."
-                                                        : L"Removing echo from your speakers.";
-        DrawTextW(dc, msg, -1, &status, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (n == 0)
+        {
+            RECT status{S(kPad), S(y), S(kWidth - kPad), S(y + kStatusH)};
+            SetTextColor(dc, t.subtle);
+            DrawTextW(dc, L"No app is using a microphone right now.", -1, &status, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        for (int k = 0; k < n && k < g_devices; ++k)
+        {
+            const telemetry::Values& d = devs[k].values;
+            RECT name{S(kPad), S(y), S(kWidth - kPad), S(y + kDevNameH)};
+            SetTextColor(dc, t.text);
+            DrawTextW(dc, devs[k].name, -1, &name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            y += kDevNameH;
+            wchar_t buf[32];
+            swprintf_s(buf, L"%.0f dB", std::max(0.0f, d.echoRemovedDb));
+            DrawMeter(dc, y, L"Echo removed", d.echoRemovedDb, 40.0f, buf, t, d.aecRunning && s.aecEnabled);
+            y += kMeterH;
+            swprintf_s(buf, L"%+.0f dB", d.agcGainDb);
+            DrawMeter(dc, y, L"Automatic gain", d.agcGainDb, 30.0f, buf, t, s.agcEnabled != 0);
+            y += kMeterH;
+            RECT status{S(kPad), S(y), S(kWidth - kPad), S(y + kStatusH)};
+            SetTextColor(dc, t.subtle);
+            const wchar_t* msg = !d.aecRunning             ? L"No echo reference for this recording."
+                                 : d.referenceDbfs < -70.0f ? L"Echo cancellation ready (nothing playing)."
+                                                            : L"Removing echo from your speakers.";
+            DrawTextW(dc, msg, -1, &status, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            y += kStatusH + 6;
+        }
 
         // "More settings" link
         SelectObject(dc, body);
@@ -295,6 +311,10 @@ namespace
 
     void ShowFlyout()
     {
+        {
+            telemetry::Device devs[telemetry::kMaxSlots];
+            g_devices = telemetry::ReadAll(devs);
+        }
         // Place it above the tray icon (Windows 11 taskbar is usually at the bottom).
         const int w = S(kWidth), h = S(HeightDip());
         NOTIFYICONIDENTIFIER id{sizeof(id), g_flyout, kTrayId};
@@ -369,8 +389,22 @@ namespace
             if (wp == VK_ESCAPE) HideFlyout();
             return 0;
         case WM_TIMER:
+        {
+            // Resize when microphones start or stop being used.
+            telemetry::Device devs[telemetry::kMaxSlots];
+            const int n = telemetry::ReadAll(devs);
+            if (n != g_devices)
+            {
+                RECT r;
+                GetWindowRect(hwnd, &r);
+                const int oldH = r.bottom - r.top;
+                g_devices = n;
+                const int newH = S(HeightDip());
+                SetWindowPos(hwnd, nullptr, r.left, r.top + (oldH - newH), r.right - r.left, newH, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
+        }
         case WM_LBUTTONUP:
         {
             const POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
@@ -436,6 +470,11 @@ namespace tray
         const BOOL dark = IsDark();
         DwmSetWindowAttribute(g_flyout, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
         g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+        // When the app runs elevated (e.g. started from an admin shell), Windows blocks messages from the
+        // non-elevated taskbar (UIPI): allow the tray callback and Explorer's restart broadcast explicitly.
+        ChangeWindowMessageFilterEx(g_flyout, WM_TRAY, MSGFLT_ALLOW, nullptr);
+        ChangeWindowMessageFilterEx(g_flyout, g_taskbarCreated, MSGFLT_ALLOW, nullptr);
+        ChangeWindowMessageFilterEx(g_flyout, WM_COMMAND, MSGFLT_ALLOW, nullptr);
         AddTrayIcon();
         return true;
     }

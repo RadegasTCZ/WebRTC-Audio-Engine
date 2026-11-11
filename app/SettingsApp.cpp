@@ -278,6 +278,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
     AdjustWindowRectExForDpi(&rc, style, FALSE, 0, g_dpi);
     g_wnd = CreateWindowExW(0, wc.lpszClassName, L"WebRTC Audio Engine Settings", style, CW_USEDEFAULT, CW_USEDEFAULT,
                             rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);
+    ChangeWindowMessageFilterEx(g_wnd, g_showMsg, MSGFLT_ALLOW, nullptr);  // a non-elevated second launch may ask us to show
     BuildUi();
     LoadUi();
     Status(L"Changes apply immediately.");

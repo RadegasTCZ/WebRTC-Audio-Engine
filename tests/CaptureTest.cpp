@@ -30,12 +30,17 @@ int wmain(int argc, wchar_t** argv)
         const int count = argc > 2 ? _wtoi(argv[2]) * 5 : 25;
         for (int i = 0; i < count; ++i)
         {
-            telemetry::Data d{};
-            if (telemetry::Read(d))
-                std::printf("in %6.1f  out %6.1f  ref %6.1f dBFS | echo removed %5.1f dB  agc %+5.1f dB  limiter %4.1f dB | aec %u  %u Hz\n",
-                            d.inputDbfs, d.outputDbfs, d.referenceDbfs, d.echoRemovedDb, d.agcGainDb, d.limiterDb, d.aecRunning, d.sampleRate);
-            else
+            telemetry::Device devs[telemetry::kMaxSlots];
+            const int n = telemetry::ReadAll(devs);
+            if (n == 0)
                 std::printf("(no live data)\n");
+            for (int k = 0; k < n; ++k)
+            {
+                const auto& d = devs[k].values;
+                std::wprintf(L"[%ls] in %6.1f out %6.1f ref %6.1f dBFS | echo removed %5.1f dB agc %+5.1f dB limiter %4.1f dB | aec %u %u Hz\n",
+                             devs[k].name, d.inputDbfs, d.outputDbfs, d.referenceDbfs, d.echoRemovedDb, d.agcGainDb, d.limiterDb,
+                             d.aecRunning, d.sampleRate);
+            }
             Sleep(200);
         }
         return 0;

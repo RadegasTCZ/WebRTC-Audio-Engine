@@ -206,6 +206,8 @@ STDMETHODIMP CProbeApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
 
     wchar_t modeGuid[40];
     apolog::GuidToString(m_mode, modeGuid);
+    wcsncpy_s(m_endpointName, endpointName, _TRUNCATE);
+    wcsncpy_s(m_endpointKey, mmEndpointId, _TRUNCATE);
     apolog::Write(L"[%s #%ld] Initialize cb=%u (%s) mode=%s %s discoveryOnly=%d endpoint=\"%s\" mmdevice=%s io=%s hwVolumeBus=%d",
                   SlotName(), m_instanceId, cbDataSize, initKind,
                   ModeName(m_mode), modeGuid, discoveryOnly, endpointName, mmEndpointId, endpointId,
@@ -330,7 +332,7 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
                                               u32NumOutputConnections ? ppOutputConnections[0]->u32MaxFrameCount : 0u);
             m_proc.SetReference(m_refActive.load() ? &m_ref : nullptr);  // echo reference attached by AddAuxiliaryInput
             if (m_slot == ApoSlot::Pack && !m_telemetry)
-                m_telemetry = telemetry::OpenWriter();  // live meters for the tray app (non-RT here)
+                m_telemetry = telemetry::ClaimSlot(m_endpointKey, m_endpointName);  // per-device meters for the tray app (non-RT)
             ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(std::lround(fmt.fFramesPerSecond)), s,
                                 static_cast<int>(maxFrames ? maxFrames : 4096));
             apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f%s maxFrames=%u latency=%d frames",
@@ -399,7 +401,7 @@ STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CON
         VoiceProcessor::Meters mt;
         if (m_telemetry && m_proc.TakeMeters(mt))
         {
-            telemetry::Data d{};
+            telemetry::Values d{};
             d.inputDbfs = mt.inputDbfs; d.outputDbfs = mt.outputDbfs; d.referenceDbfs = mt.referenceDbfs;
             d.echoRemovedDb = mt.echoRemovedDb; d.agcGainDb = mt.agcGainDb; d.limiterDb = mt.limiterDb;
             d.aecRunning = mt.aecRunning ? 1u : 0u;

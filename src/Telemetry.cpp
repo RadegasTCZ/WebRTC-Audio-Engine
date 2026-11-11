@@ -3,88 +3,126 @@
 #include <sddl.h>
 #include <atomic>
 #include <cstring>
+#include <cwchar>
 
 namespace telemetry
 {
-    Data* OpenWriter() noexcept
+    namespace
     {
-        static std::atomic<Data*> s_data{nullptr};
-        if (Data* d = s_data.load())
-            return d;
-        // SYSTEM + LOCAL SERVICE + app containers (audiodg) full access; Users, Admins read only.
-        SECURITY_ATTRIBUTES sa{sizeof(sa)};
-        PSECURITY_DESCRIPTOR sd = nullptr;
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                L"D:(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;AC)(A;;GA;;;S-1-15-2-2)(A;;GR;;;BU)(A;;GR;;;BA)", SDDL_REVISION_1, &sd,
-                nullptr))
-            return nullptr;
-        sa.lpSecurityDescriptor = sd;
-        HANDLE h = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(Data), kSectionName);
-        LocalFree(sd);
-        if (!h)
-            return nullptr;
-        auto* d = static_cast<Data*>(MapViewOfFile(h, FILE_MAP_WRITE, 0, 0, sizeof(Data)));
-        // The handle is kept for the process lifetime (the section must outlive every effect instance).
-        if (!d)
+        Section* OpenSection() noexcept
         {
-            CloseHandle(h);
-            return nullptr;
+            static std::atomic<Section*> s_section{nullptr};
+            if (Section* s = s_section.load())
+                return s;
+            // SYSTEM + LOCAL SERVICE + app containers (audiodg) full access; Users, Admins read only.
+            SECURITY_ATTRIBUTES sa{sizeof(sa)};
+            PSECURITY_DESCRIPTOR sd = nullptr;
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    L"D:(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;AC)(A;;GA;;;S-1-15-2-2)(A;;GR;;;BU)(A;;GR;;;BA)", SDDL_REVISION_1,
+                    &sd, nullptr))
+                return nullptr;
+            sa.lpSecurityDescriptor = sd;
+            HANDLE h = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa, PAGE_READWRITE, 0, sizeof(Section), kSectionName);
+            LocalFree(sd);
+            if (!h)
+                return nullptr;
+            auto* s = static_cast<Section*>(MapViewOfFile(h, FILE_MAP_WRITE, 0, 0, sizeof(Section)));
+            if (!s)
+            {
+                CloseHandle(h);
+                return nullptr;
+            }
+            s->version = kVersion;  // handle kept for the process lifetime
+            Section* expected = nullptr;
+            if (!s_section.compare_exchange_strong(expected, s))
+            {
+                UnmapViewOfFile(s);
+                CloseHandle(h);
+                return expected;
+            }
+            return s;
         }
-        d->version = kVersion;
-        Data* expected = nullptr;
-        if (!s_data.compare_exchange_strong(expected, d))
+
+        LONG64 KeyOf(const wchar_t* id) noexcept
         {
-            UnmapViewOfFile(d);
-            CloseHandle(h);
-            return expected;
+            uint64_t h = 1469598103934665603ull;  // FNV-1a
+            for (; id && *id; ++id) { h ^= static_cast<uint16_t>(*id); h *= 1099511628211ull; }
+            return static_cast<LONG64>(h ? h : 1);
         }
-        return d;
     }
 
-    void Publish(Data* d, const Data& v) noexcept
+    Slot* ClaimSlot(const wchar_t* endpointId, const wchar_t* friendlyName) noexcept
     {
-        if (!d)
+        Section* s = OpenSection();
+        if (!s)
+            return nullptr;
+        const LONG64 key = KeyOf(endpointId);
+        auto setName = [&](Slot& slot) { wcsncpy_s(slot.name, friendlyName ? friendlyName : L"Microphone", _TRUNCATE); };
+        for (Slot& slot : s->slots)  // same device already has a slot (another stream of it)
+            if (slot.key == key) { setName(slot); return &slot; }
+        const uint64_t now = GetTickCount64();
+        for (Slot& slot : s->slots)  // free or stale slot
+        {
+            const LONG64 old = slot.key;
+            if ((old == 0 || now - slot.tickMs > kSlotStaleMs) && InterlockedCompareExchange64(&slot.key, key, old) == old)
+            {
+                setName(slot);
+                slot.tickMs = 0;
+                return &slot;
+            }
+        }
+        return nullptr;  // more than kMaxSlots active devices: no meters for this one
+    }
+
+    void Publish(Slot* slot, const Values& v) noexcept
+    {
+        if (!slot)
             return;
-        const uint32_t s = d->seq;
-        d->seq = s + 1;
+        const uint32_t s = slot->seq;
+        slot->seq = s + 1;
         std::atomic_thread_fence(std::memory_order_release);
-        d->tickMs = GetTickCount64();
-        d->inputDbfs = v.inputDbfs;
-        d->outputDbfs = v.outputDbfs;
-        d->referenceDbfs = v.referenceDbfs;
-        d->echoRemovedDb = v.echoRemovedDb;
-        d->agcGainDb = v.agcGainDb;
-        d->limiterDb = v.limiterDb;
-        d->aecRunning = v.aecRunning;
-        d->sampleRate = v.sampleRate;
+        slot->values = v;
+        slot->tickMs = GetTickCount64();
         std::atomic_thread_fence(std::memory_order_release);
-        d->seq = s + 2;
+        slot->seq = s + 2;
     }
 
-    bool Read(Data& out, uint64_t maxAgeMs) noexcept
+    int ReadAll(Device (&out)[kMaxSlots], uint64_t maxAgeMs) noexcept
     {
         HANDLE h = OpenFileMappingW(FILE_MAP_READ, FALSE, kSectionName);
         if (!h)
-            return false;
-        const auto* d = static_cast<const Data*>(MapViewOfFile(h, FILE_MAP_READ, 0, 0, sizeof(Data)));
-        bool ok = false;
-        if (d && d->version == kVersion)
+            return 0;
+        const auto* s = static_cast<const Section*>(MapViewOfFile(h, FILE_MAP_READ, 0, 0, sizeof(Section)));
+        int n = 0;
+        if (s && s->version == kVersion)
         {
-            for (int tries = 0; tries < 8 && !ok; ++tries)
+            const uint64_t now = GetTickCount64();
+            for (const Slot& slot : s->slots)
             {
-                const uint32_t s1 = d->seq;
-                if (s1 & 1u)
+                if (slot.key == 0)
                     continue;
-                std::atomic_thread_fence(std::memory_order_acquire);
-                std::memcpy(&out, const_cast<const Data*>(d), sizeof(Data));
-                std::atomic_thread_fence(std::memory_order_acquire);
-                ok = d->seq == s1;
+                for (int tries = 0; tries < 8; ++tries)
+                {
+                    const uint32_t s1 = slot.seq;
+                    if (s1 & 1u)
+                        continue;
+                    std::atomic_thread_fence(std::memory_order_acquire);
+                    Device d{};
+                    std::memcpy(d.name, slot.name, sizeof(d.name));
+                    std::memcpy(&d.values, const_cast<const Values*>(&slot.values), sizeof(Values));
+                    const uint64_t tick = slot.tickMs;
+                    std::atomic_thread_fence(std::memory_order_acquire);
+                    if (slot.seq != s1)
+                        continue;
+                    if (tick && now - tick <= maxAgeMs)
+                        out[n++] = d;
+                    break;
+                }
             }
-            ok = ok && GetTickCount64() - out.tickMs <= maxAgeMs;
         }
-        if (d)
-            UnmapViewOfFile(d);
+        if (s)
+            UnmapViewOfFile(s);
         CloseHandle(h);
-        return ok;
+        return n;
     }
 }
