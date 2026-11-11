@@ -1,0 +1,33 @@
+; WebRTC Audio Engine: extension INF (test-signed experiment).
+; Same shape as Windows' VocaEffectPack-Extension.inf: attaches to the computer device
+; (COMPUTER\Generic), not to any audio hardware, and only adds our effect-pack component.
+; The component is installed by ..\component\WebrtcAudioEngine.inf.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = Extension
+ClassGuid   = {e2f84ce7-8efa-411c-aa69-97454ca4cb57}
+Provider    = %ProviderName%
+ExtensionId = {D7CB5AB7-E0E7-45B3-86B8-04A0D4C3F034}
+DriverVer   = 11/11/2026,0.1.0.0
+CatalogFile = WebrtcAudioEngine-Extension.cat
+PnpLockDown = 1
+
+[Manufacturer]
+%MfgName% = WebrtcExtension,NTamd64
+
+[WebrtcExtension.NTamd64]
+%Device.ExtensionDesc% = WebrtcExtension_Install,COMPUTER\Generic
+
+[WebrtcExtension_Install]
+
+[WebrtcExtension_Install.Components]
+AddComponent = WebrtcAudioEngine,,Apo_AddComponent
+
+[Apo_AddComponent]
+ComponentIDs = VEN_WRTC&AUDIO_EFFECTPACK_WEBRTCENGINE
+
+[Strings]
+ProviderName         = "RadegasTCZ"
+MfgName              = "RadegasTCZ"
+Device.ExtensionDesc = "WebRTC Audio Engine Effect Pack"

@@ -58,6 +58,7 @@ namespace
 
     ClassFactory g_factoryMfx(ApoSlot::MFX);
     ClassFactory g_factoryEfx(ApoSlot::EFX);
+    ClassFactory g_factoryPack(ApoSlot::Pack);
 }
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
@@ -76,6 +77,8 @@ _Check_return_ STDAPI DllGetClassObject(_In_ REFCLSID rclsid, _In_ REFIID riid, 
         return g_factoryMfx.QueryInterface(riid, ppv);
     if (rclsid == CLSID_WebrtcVoiceApoEFX)
         return g_factoryEfx.QueryInterface(riid, ppv);
+    if (rclsid == CLSID_WebrtcAudioEnginePack)
+        return g_factoryPack.QueryInterface(riid, ppv);
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 

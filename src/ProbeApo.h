@@ -6,7 +6,8 @@
 #include <atomic>
 #include "VoiceProcessor.h"
 
-enum class ApoSlot { MFX, EFX };
+// MFX = bit-exact probe; EFX = NS appended to the OEM endpoint chain; Pack = NS as our own effect pack.
+enum class ApoSlot { MFX, EFX, Pack };
 
 // Settings read from HKLM\SOFTWARE\WebrtcVoiceApo at every LockForProcess (i.e. per stream start).
 struct ApoSettings
@@ -73,7 +74,7 @@ private:
 
     ~CProbeApo() override;
     HRESULT NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcept;
-    const wchar_t* SlotName() const noexcept { return m_slot == ApoSlot::MFX ? L"MFX" : L"EFX"; }
+    const wchar_t* SlotName() const noexcept { return m_slot == ApoSlot::MFX ? L"MFX" : m_slot == ApoSlot::EFX ? L"EFX" : L"PACK"; }
     void ResetStats() noexcept;
 
     InnerUnknown m_inner;

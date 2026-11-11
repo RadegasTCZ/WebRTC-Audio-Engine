@@ -17,6 +17,8 @@ namespace
                                   1, 0, __uuidof(IAudioProcessingObject), APO_FLAG_DEFAULT);
     CRegAPOProperties<1> g_regEfx(CLSID_WebrtcVoiceApoEFX, L"WebRTC Voice Probe (EFX)", L"Copyright (c) RadegasTCZ",
                                   1, 0, __uuidof(IAudioProcessingObject), APO_FLAG_DEFAULT);
+    CRegAPOProperties<1> g_regPack(CLSID_WebrtcAudioEnginePack, L"WebRTC Audio Engine", L"Copyright (c) RadegasTCZ",
+                                   1, 0, __uuidof(IAudioProcessingObject), APO_FLAG_DEFAULT);
 
     const wchar_t* ModeName(REFGUID m) noexcept
     {
@@ -37,8 +39,9 @@ namespace
 }
 
 CProbeApo::CProbeApo(ApoSlot slot, IUnknown* outer) noexcept
-    : CBaseAudioProcessingObject(slot == ApoSlot::MFX ? &g_regMfx.m_Properties
-                                                      : &g_regEfx.m_Properties),
+    : CBaseAudioProcessingObject(slot == ApoSlot::MFX   ? &g_regMfx.m_Properties
+                                 : slot == ApoSlot::EFX ? &g_regEfx.m_Properties
+                                                        : &g_regPack.m_Properties),
       m_slot(slot),
       m_instanceId(++s_nextInstance)
 {
@@ -254,9 +257,9 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
     ResetStats();
     m_lockTick = GetTickCount64();
 
-    // Noise suppression runs in the endpoint slot only; the MFX stays a pure probe.
+    // Noise suppression runs in the EFX and in the effect pack; the plain MFX stays a pure probe.
     m_proc.Prepare(0, 0, VoiceProcessor::Level::k12dB);  // deactivate (frees nothing on RT path)
-    if (m_slot == ApoSlot::EFX)
+    if (m_slot != ApoSlot::MFX)
     {
         const ApoSettings s = ApoSettings::Read();
         bool ok = false;

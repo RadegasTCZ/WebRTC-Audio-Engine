@@ -170,6 +170,7 @@ int wmain(int argc, wchar_t** argv)
         {
             rc |= RunOne(getClassObject, CLSID_WebrtcVoiceApoMFX, "MFX", period, aggregated);
             rc |= RunOne(getClassObject, CLSID_WebrtcVoiceApoEFX, "EFX", period, aggregated);
+            rc |= RunOne(getClassObject, CLSID_WebrtcAudioEnginePack, "PACK", period, aggregated);
         }
     using CanUnloadFn = HRESULT(STDAPICALLTYPE*)();
     auto canUnload = reinterpret_cast<CanUnloadFn>(GetProcAddress(dll, "DllCanUnloadNow"));
