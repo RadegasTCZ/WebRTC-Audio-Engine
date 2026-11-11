@@ -4,8 +4,17 @@
 #include <audioenginebaseapo.h>
 #include <baseaudioprocessingobject.h>
 #include <atomic>
+#include "VoiceProcessor.h"
 
 enum class ApoSlot { MFX, EFX };
+
+// Settings read from HKLM\SOFTWARE\WebrtcVoiceApo at every LockForProcess (i.e. per stream start).
+struct ApoSettings
+{
+    DWORD nsLevel = 1;  // 0 = 6 dB, 1 = 12 dB (default, like the plugin), 2 = 18 dB, 3 = 21 dB
+    DWORD bypass = 0;   // 1 = pass audio through untouched (for A/B listening)
+    static ApoSettings Read() noexcept;
+};
 
 // Milestone 1, step 1: pass-through probe.
 // Audio is copied through untouched. Non-real-time callbacks log what the audio engine
@@ -26,6 +35,7 @@ public:
 
     // IAudioProcessingObject
     STDMETHOD(Initialize)(UINT32 cbDataSize, BYTE* pbyData) override;
+    STDMETHOD(GetLatency)(HNSTIME* pTime) override;
 
     STDMETHOD(IsInputFormatSupported)(IAudioMediaType* pOppositeFormat, IAudioMediaType* pRequestedInputFormat,
                                       IAudioMediaType** ppSupportedInputFormat) override;
@@ -72,6 +82,9 @@ private:
     const ApoSlot m_slot;
     const long m_instanceId;
     GUID m_mode{};
+
+    // Noise suppression (EFX only). Prepared in LockForProcess, used in APOProcess.
+    VoiceProcessor m_proc;
 
     // Cached at LockForProcess (never changes while locked).
     UINT32 m_bytesPerFrame = 0;

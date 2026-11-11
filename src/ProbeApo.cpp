@@ -153,6 +153,32 @@ STDMETHODIMP CProbeApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
     return S_OK;
 }
 
+// ---------------------------------------------------------------- Settings
+
+ApoSettings ApoSettings::Read() noexcept
+{
+    ApoSettings s;
+    auto readDword = [](const wchar_t* name, DWORD& value) {
+        DWORD v = 0, size = sizeof(v);
+        if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WebrtcVoiceApo", name, RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS)
+            value = v;
+    };
+    readDword(L"NsLevel", s.nsLevel);
+    readDword(L"Bypass", s.bypass);
+    if (s.nsLevel > 3)
+        s.nsLevel = 1;
+    return s;
+}
+
+STDMETHODIMP CProbeApo::GetLatency(HNSTIME* pTime)
+{
+    if (!pTime)
+        return E_POINTER;
+    // HNSTIME is in 100 ns units.
+    *pTime = m_proc.IsActive() ? static_cast<HNSTIME>(VoiceProcessor::kTotalLatency) * 10000000 / VoiceProcessor::kSampleRate : 0;
+    return S_OK;
+}
+
 // ---------------------------------------------------------------- Format negotiation (logged)
 
 namespace
@@ -228,6 +254,27 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
     ResetStats();
     m_lockTick = GetTickCount64();
 
+    // Noise suppression runs in the endpoint slot only; the MFX stays a pure probe.
+    m_proc.Prepare(0, 0, VoiceProcessor::Level::k12dB);  // deactivate (frees nothing on RT path)
+    if (m_slot == ApoSlot::EFX)
+    {
+        const ApoSettings s = ApoSettings::Read();
+        bool ok = false;
+        if (s.bypass)
+            apolog::Write(L"[%s #%ld] NS bypassed by setting (Bypass=1)", SlotName(), m_instanceId);
+        else if (!m_isFloat32)
+            apolog::Write(L"[%s #%ld] NS off: format is not float32", SlotName(), m_instanceId);
+        else
+        {
+            ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(fmt.fFramesPerSecond),
+                                static_cast<VoiceProcessor::Level>(s.nsLevel));
+            apolog::Write(L"[%s #%ld] NS %s: level=%u (%s dB) channels=%u rate=%.0f latency=%d samples",
+                          SlotName(), m_instanceId, ok ? L"ACTIVE" : L"off (unsupported format)", s.nsLevel,
+                          s.nsLevel == 0 ? L"6" : s.nsLevel == 1 ? L"12" : s.nsLevel == 2 ? L"18" : L"21",
+                          m_channels, fmt.fFramesPerSecond, ok ? VoiceProcessor::kTotalLatency : 0);
+        }
+    }
+
     apolog::Write(L"[%s #%ld] LockForProcess mode=%s fmt=%s %u ch %u-bit(container %u) %.0f Hz mask=0x%X maxFrames in=%u out=%u inBufType=%d",
                   SlotName(), m_instanceId, ModeName(m_mode), m_isFloat32 ? L"float32" : L"non-float",
                   fmt.dwSamplesPerFrame, fmt.dwValidBitsPerSample, fmt.dwBytesPerSampleContainer * 8,
@@ -264,6 +311,32 @@ STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CON
     ++m_processCalls;
     if (frames < m_minPeriod) m_minPeriod = frames;
     if (frames > m_maxPeriod) m_maxPeriod = frames;
+
+    if (m_proc.IsActive())
+    {
+        // NS keeps a continuous timeline: silent buffers are fed as zeros so the FIFO stays in step.
+        float* o = reinterpret_cast<float*>(out->pBuffer);
+        if (in->u32BufferFlags == BUFFER_VALID)
+            m_proc.Process(reinterpret_cast<const float*>(in->pBuffer), o, static_cast<int>(frames));
+        else
+        {
+            std::memset(o, 0, static_cast<size_t>(frames) * m_bytesPerFrame);
+            m_proc.Process(o, o, static_cast<int>(frames));
+            ++m_silentCalls;
+        }
+        float peak = m_peak;
+        const size_t n = static_cast<size_t>(frames) * m_channels;
+        for (size_t i = 0; i < n; ++i)
+        {
+            const float a = std::fabs(o[i]);
+            if (a > peak) peak = a;
+        }
+        m_peak = peak;
+        m_validFrames += frames;
+        out->u32ValidFrameCount = frames;
+        out->u32BufferFlags = BUFFER_VALID;
+        return;
+    }
 
     if (in->u32BufferFlags == BUFFER_VALID)
     {

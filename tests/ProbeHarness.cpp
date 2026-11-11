@@ -38,6 +38,7 @@ struct FakeOuter final : IUnknown
 static int RunOne(GetClassObjectFn getClassObject, REFCLSID clsid, const char* name, UINT32 period, bool aggregated)
 {
     std::printf("--- %s, period %u frames, %s\n", name, period, aggregated ? "AGGREGATED (like audiodg)" : "standalone");
+    const bool isMfx = IsEqualCLSID(clsid, CLSID_WebrtcVoiceApoMFX) != FALSE;
     IClassFactory* factory = nullptr;
     HRESULT hr = getClassObject(clsid, __uuidof(IClassFactory), reinterpret_cast<void**>(&factory));
     if (FAILED(hr)) return Fail("DllGetClassObject", hr);
@@ -117,13 +118,19 @@ static int RunOne(GetClassObjectFn getClassObject, REFCLSID clsid, const char* n
             for (UINT32 c = 0; c < channels; ++c) inBuf[static_cast<size_t>(i) * channels + c] = s;
         }
         rt->APOProcess(1, inProps, 1, outProps);
-        if (outProp.u32ValidFrameCount != period || outProp.u32BufferFlags != BUFFER_VALID ||
-            std::memcmp(inBuf.data(), outBuf.data(), inBuf.size() * sizeof(float)) != 0)
-            return Fail("pass-through mismatch", E_FAIL);
+        if (outProp.u32ValidFrameCount != period || outProp.u32BufferFlags != BUFFER_VALID)
+            return Fail("frame count / flags wrong", E_FAIL);
+        if (isMfx && std::memcmp(inBuf.data(), outBuf.data(), inBuf.size() * sizeof(float)) != 0)
+            return Fail("MFX probe must pass through bit-exact", E_FAIL);
+        for (float v : outBuf)
+            if (!std::isfinite(v)) return Fail("non-finite output", E_FAIL);
     }
     inProp.u32BufferFlags = BUFFER_SILENT;
     rt->APOProcess(1, inProps, 1, outProps);
-    if (outProp.u32BufferFlags != BUFFER_SILENT) return Fail("silent flag not propagated", E_FAIL);
+    // MFX propagates SILENT; EFX with NS active outputs VALID (its FIFO keeps running).
+    if (isMfx ? outProp.u32BufferFlags != BUFFER_SILENT
+              : (outProp.u32BufferFlags != BUFFER_SILENT && outProp.u32BufferFlags != BUFFER_VALID))
+        return Fail("silent buffer handling", E_FAIL);
 
     // In-place case (same buffer for input and output).
     inProp.u32BufferFlags = BUFFER_VALID;
@@ -144,7 +151,7 @@ static int RunOne(GetClassObjectFn getClassObject, REFCLSID clsid, const char* n
         if (outer.refs != 1) return Fail("outer refcount not balanced", E_FAIL);
         left = outer.inner->Release();  // the engine releases the inner object last
     }
-    std::printf("OK: %u blocks passed through bit-exact, final refcount %lu\n", blocks + 2, left);
+    std::printf("OK: %u blocks %s, final refcount %lu\n", blocks + 2, isMfx ? "passed through bit-exact" : "processed, all finite", left);
     return left == 0 ? 0 : Fail("refcount leak", E_FAIL);
 }
 

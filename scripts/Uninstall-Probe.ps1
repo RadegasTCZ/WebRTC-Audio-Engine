@@ -44,7 +44,7 @@ foreach ($p in $plans) {
 $sysfxNow = $props.GetValue($PKEY_DisableSysFx)
 $sysfxOrig = if ($orig) { $orig.DisableSysFx } else { $sysfxNow }
 Write-Host "Disable_SysFx: now=$(if ($null -eq $sysfxNow) {'(not set)'} else {$sysfxNow})  restore=$(if ($null -eq $sysfxOrig) {'(not set)'} else {$sysfxOrig})"
-Write-Host "Remove: COM + APO keys for $ClsidMfx, $ClsidEfx; folder $InstallDir$(if ($RemoveLogs) { " and $LogDir" })"
+Write-Host "Remove: COM + APO keys for $ClsidMfx, $ClsidEfx; NS settings HKLM\SOFTWARE\WebrtcVoiceApo; folder $InstallDir$(if ($RemoveLogs) { " and $LogDir" })"
 if ($DryRun) { Write-Host "`nDry run: nothing was changed."; return }
 
 Stop-Audio
@@ -66,6 +66,7 @@ try {
         $hklm.DeleteSubKeyTree("SOFTWARE\Classes\CLSID\$c", $false)
         $hklm.DeleteSubKeyTree("SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$c", $false)
     }
+    $hklm.DeleteSubKeyTree('SOFTWARE\WebrtcVoiceApo', $false)   # NS settings (Set-NsSettings.ps1)
 }
 finally {
     $fx.Close(); $props.Close()

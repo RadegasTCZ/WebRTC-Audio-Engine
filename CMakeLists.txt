@@ -11,6 +11,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Static CRT: audiodg must not depend on a VC++ redistributable being installed.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# --- WebRTC noise suppressor (vendored, see third_party/UPSTREAM.md) + our processing core
+file(GLOB WEBRTC_NS_SOURCES CONFIGURE_DEPENDS third_party/webrtc/modules/audio_processing/ns/*.cc)
+add_library(voice_core STATIC
+  ${WEBRTC_NS_SOURCES}
+  third_party/webrtc/modules/audio_processing/three_band_filter_bank.cc
+  third_party/webrtc/common_audio/third_party/ooura/fft_size_256/fft4g.cc
+  src/VoiceProcessor.cpp
+  src/VoiceProcessor.h
+)
+target_include_directories(voice_core PUBLIC third_party/webrtc/shim third_party/webrtc)
+target_compile_definitions(voice_core PUBLIC NOMINMAX _USE_MATH_DEFINES)
+target_compile_options(voice_core PRIVATE /W3 /guard:cf)
+set_source_files_properties(${WEBRTC_NS_SOURCES} PROPERTIES COMPILE_OPTIONS "/W0")
+
 add_library(WebrtcVoiceApo SHARED
   src/DllMain.cpp
   src/ProbeApo.cpp
@@ -20,6 +34,7 @@ add_library(WebrtcVoiceApo SHARED
   src/Guids.h
   src/WebrtcVoiceApo.def
 )
+target_link_libraries(WebrtcVoiceApo PRIVATE voice_core)
 
 target_compile_definitions(WebrtcVoiceApo PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(WebrtcVoiceApo PRIVATE /W4 /permissive- /EHsc /guard:cf)
@@ -38,6 +53,10 @@ add_executable(ProbeHarness tests/ProbeHarness.cpp)
 target_compile_definitions(ProbeHarness PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(ProbeHarness PRIVATE audiomediatypecrt ole32 uuid)
 add_dependencies(ProbeHarness WebrtcVoiceApo)
+
+# Offline tests of the processing core.
+add_executable(ProcessorTests tests/ProcessorTests.cpp)
+target_link_libraries(ProcessorTests PRIVATE voice_core)
 
 # Opens the mic through WASAPI in a chosen category / RAW mode and reports errors + level.
 add_executable(CaptureTest tests/CaptureTest.cpp)
