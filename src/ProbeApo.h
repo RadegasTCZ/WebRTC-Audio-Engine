@@ -126,6 +126,8 @@ private:
     ::telemetry::Slot* m_telemetry = nullptr;  // this device's shared-memory meters for the tray app
     wchar_t m_endpointName[64] = L"Microphone";
     wchar_t m_endpointKey[128] = L"";
+    wchar_t m_deviceGuid[64] = L"";   // endpoint GUID, the key for per-device settings
+    int m_devIdx = -1;                // settings snapshot index (-1 = defaults)
 
     // Cached at LockForProcess (never changes while locked).
     UINT32 m_bytesPerFrame = 0;

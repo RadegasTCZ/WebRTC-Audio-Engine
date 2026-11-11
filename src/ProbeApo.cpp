@@ -208,6 +208,8 @@ STDMETHODIMP CProbeApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
     apolog::GuidToString(m_mode, modeGuid);
     wcsncpy_s(m_endpointName, endpointName, _TRUNCATE);
     wcsncpy_s(m_endpointKey, mmEndpointId, _TRUNCATE);
+    if (const wchar_t* brace = wcsrchr(mmEndpointId, L'{'))  // "{0.0.1.00000000}.{guid}" -> "{guid}"
+        wcsncpy_s(m_deviceGuid, brace, _TRUNCATE);
     apolog::Write(L"[%s #%ld] Initialize cb=%u (%s) mode=%s %s discoveryOnly=%d endpoint=\"%s\" mmdevice=%s io=%s hwVolumeBus=%d",
                   SlotName(), m_instanceId, cbDataSize, initKind,
                   ModeName(m_mode), modeGuid, discoveryOnly, endpointName, mmEndpointId, endpointId,
@@ -322,7 +324,9 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
     if (m_slot != ApoSlot::MFX)
     {
         settings::EnsureWatcher();  // live settings (non-RT here)
-        const Settings s = settings::Current();
+        m_devIdx = settings::RegisterDevice(m_deviceGuid);  // this microphone's settings (defaults or its own)
+        m_proc.SetSettingsIndex(m_devIdx);
+        const Settings s = settings::Current(m_devIdx);
         bool ok = false;
         if (!m_isFloat32)
             apolog::Write(L"[%s #%ld] processing off: format is not float32", SlotName(), m_instanceId);
@@ -332,7 +336,7 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
                                               u32NumOutputConnections ? ppOutputConnections[0]->u32MaxFrameCount : 0u);
             m_proc.SetReference(m_refActive.load() ? &m_ref : nullptr);  // echo reference attached by AddAuxiliaryInput
             if (m_slot == ApoSlot::Pack && !m_telemetry)
-                m_telemetry = telemetry::ClaimSlot(m_endpointKey, m_endpointName);  // per-device meters for the tray app (non-RT)
+                m_telemetry = telemetry::ClaimSlot(m_endpointKey, m_endpointName, m_deviceGuid);  // per-device meters for the tray app (non-RT)
             ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(std::lround(fmt.fFramesPerSecond)), s,
                                 static_cast<int>(maxFrames ? maxFrames : 4096));
             apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f%s maxFrames=%u latency=%d frames",
@@ -388,7 +392,7 @@ STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CON
     {
         // NS keeps a continuous timeline: silent buffers are fed as zeros so the FIFO stays in step.
         float* o = reinterpret_cast<float*>(out->pBuffer);
-        const Settings cur = settings::Current();
+        const Settings cur = settings::Current(m_devIdx);
         const float gainDb = SliderGainDb(cur);
         if (in->u32BufferFlags == BUFFER_VALID)
             m_proc.Process(reinterpret_cast<const float*>(in->pBuffer), o, static_cast<int>(frames), cur, gainDb);
@@ -621,7 +625,7 @@ STDMETHODIMP CProbeApo::GetControllableSystemEffectsList(AUDIO_SYSTEMEFFECT** ef
         return E_POINTER;
     *effects = nullptr;
     *numEffects = 0;
-    const Settings s = Settings::ReadFromRegistry();
+    const Settings s = Settings::ReadFromRegistry(m_deviceGuid);
     auto* list = static_cast<AUDIO_SYSTEMEFFECT*>(CoTaskMemAlloc(3 * sizeof(AUDIO_SYSTEMEFFECT)));
     if (!list)
         return E_OUTOFMEMORY;
@@ -647,15 +651,16 @@ STDMETHODIMP CProbeApo::GetControllableSystemEffectsList(AUDIO_SYSTEMEFFECT** ef
 
 STDMETHODIMP CProbeApo::SetAudioSystemEffectState(GUID effectId, AUDIO_SYSTEMEFFECT_STATE state)
 {
-    Settings s = Settings::ReadFromRegistry();
+    // Changes this microphone's own settings if it has custom ones, otherwise the defaults.
+    const wchar_t* scope = Settings::IsDeviceCustom(m_deviceGuid) ? m_deviceGuid : nullptr;
+    Settings s = Settings::ReadFromRegistry(scope);
     const uint32_t on = state == AUDIO_SYSTEMEFFECT_STATE_ON ? 1u : 0u;
     const wchar_t* name = L"?";
     if (IsEqualGUID(effectId, kEffectAec)) { s.aecEnabled = on; name = L"AEC"; }
     else if (IsEqualGUID(effectId, kEffectNs)) { s.nsEnabled = on; name = L"NS"; }
     else if (IsEqualGUID(effectId, kEffectAgc)) { s.agcEnabled = on; name = L"AGC"; }
     else return E_NOTFOUND;
-    settings::Publish(s);                         // takes effect right away in this process
-    const LONG err = Settings::WriteToRegistry(s); // persists + reaches the settings app
+    const LONG err = Settings::WriteToRegistry(s, scope);  // persists; the watcher applies it live
     apolog::Write(L"[%s #%ld] SetAudioSystemEffectState %s -> %s (registry write %ld)", SlotName(), m_instanceId, name,
                   on ? L"ON" : L"OFF", err);
     SignalSystemEffectsChanged();
@@ -706,7 +711,7 @@ STDMETHODIMP_(void) CProbeApo::HandleNotification(APO_NOTIFICATION* n)
         m_sliderDb.store(v->masterVolumeInDb, std::memory_order_relaxed);
         apolog::Write(L"[%s #%ld] slider %.2f dB (range %.1f..%.1f) muted=%d -> applying %.2f dB",
                       SlotName(), m_instanceId, v->masterVolumeInDb, v->volumeMinInDb, v->volumeMaxInDb, muted ? 1 : 0,
-                      SliderGainDb(settings::Current()));
+                      SliderGainDb(settings::Current(m_devIdx)));
     }
     else if (n->type == APO_NOTIFICATION_TYPE_ENDPOINT_VOLUME && n->audioEndpointVolumeChange.volume)
     {

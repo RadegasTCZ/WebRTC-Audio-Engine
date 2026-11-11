@@ -7,6 +7,8 @@
 #include <shellapi.h>
 #include <windowsx.h>
 #include <algorithm>
+#include <cstdarg>
+#include <cwchar>
 #include <cmath>
 #include <string>
 #include "../src/Settings.h"
@@ -20,6 +22,32 @@ namespace
     enum MenuCmd : UINT { CMD_OPEN = 1, CMD_EXIT };
 
     HINSTANCE g_inst = nullptr;
+
+    // Small diagnostic log: %LOCALAPPDATA%\WebrtcAudioEngine\tray.log (tray events only).
+    void TrayLog(const wchar_t* fmt, ...)
+    {
+        wchar_t path[MAX_PATH];
+        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", path, MAX_PATH)) return;
+        wcscat_s(path, L"\\WebrtcAudioEngine");
+        CreateDirectoryW(path, nullptr);
+        wcscat_s(path, L"\\tray.log");
+        wchar_t msg[256];
+        va_list a;
+        va_start(a, fmt);
+        vswprintf_s(msg, fmt, a);
+        va_end(a);
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        wchar_t line[320];
+        swprintf_s(line, L"%02u:%02u:%02u.%03u %s\r\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, msg);
+        HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, 0, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return;
+        char u8[640];
+        const int n = WideCharToMultiByte(CP_UTF8, 0, line, -1, u8, sizeof(u8), nullptr, nullptr);
+        DWORD w;
+        if (n > 1) WriteFile(h, u8, n - 1, &w, nullptr);
+        CloseHandle(h);
+    }
     HWND g_flyout = nullptr;
     HICON g_icon = nullptr;
     NOTIFYICONDATAW g_nid{};
@@ -253,16 +281,20 @@ namespace
         for (int k = 0; k < n && k < g_devices; ++k)
         {
             const telemetry::Values& d = devs[k].values;
+            const bool custom = Settings::IsDeviceCustom(devs[k].device);
+            const Settings ds = Settings::ReadFromRegistry(devs[k].device);  // this microphone's effective settings
             RECT name{S(kPad), S(y), S(kWidth - kPad), S(y + kDevNameH)};
             SetTextColor(dc, t.text);
-            DrawTextW(dc, devs[k].name, -1, &name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            std::wstring label = devs[k].name;
+            if (custom) label += L"  (custom)";
+            DrawTextW(dc, label.c_str(), -1, &name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             y += kDevNameH;
             wchar_t buf[32];
             swprintf_s(buf, L"%.0f dB", std::max(0.0f, d.echoRemovedDb));
-            DrawMeter(dc, y, L"Echo removed", d.echoRemovedDb, 40.0f, buf, t, d.aecRunning && s.aecEnabled);
+            DrawMeter(dc, y, L"Echo removed", d.echoRemovedDb, 40.0f, buf, t, d.aecRunning && ds.aecEnabled);
             y += kMeterH;
             swprintf_s(buf, L"%+.0f dB", d.agcGainDb);
-            DrawMeter(dc, y, L"Automatic gain", d.agcGainDb, 30.0f, buf, t, s.agcEnabled != 0);
+            DrawMeter(dc, y, L"Automatic gain", d.agcGainDb, 30.0f, buf, t, ds.agcEnabled != 0);
             y += kMeterH;
             RECT status{S(kPad), S(y), S(kWidth - kPad), S(y + kStatusH)};
             SetTextColor(dc, t.subtle);
@@ -331,7 +363,8 @@ namespace
         int x = std::clamp(static_cast<int>(anchor.x - w / 2), static_cast<int>(wa.left + S(12)), static_cast<int>(wa.right - w - S(12)));
         int y = anchor.y < (wa.top + wa.bottom) / 2 ? wa.top + S(12) : wa.bottom - h - S(12);
         SetWindowPos(g_flyout, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
-        SetForegroundWindow(g_flyout);
+        const BOOL fg = SetForegroundWindow(g_flyout);
+        TrayLog(L"ShowFlyout at %d,%d size %dx%d foreground=%d", x, y, w, h, fg);
         SetTimer(g_flyout, kMeterTimer, 100, nullptr);
         InvalidateRect(g_flyout, nullptr, FALSE);
     }
@@ -368,22 +401,27 @@ namespace
         switch (msg)
         {
         case WM_TRAY:
+            TrayLog(L"WM_TRAY event=0x%04X visible=%d", LOWORD(lp), IsWindowVisible(hwnd) ? 1 : 0);
+            // NOTIFYICON_VERSION_4: a left click arrives as NIN_SELECT (after WM_LBUTTONDOWN/UP, which we
+            // ignore: handling both would open and immediately close the flyout). Keyboard: NIN_KEYSELECT.
             switch (LOWORD(lp))
             {
             case NIN_SELECT:
             case NIN_KEYSELECT:
-            case WM_LBUTTONUP:
                 if (IsWindowVisible(hwnd)) HideFlyout();
-                else if (GetTickCount64() - g_hiddenAt > 250) ShowFlyout();
+                else if (GetTickCount64() - g_hiddenAt > 300) ShowFlyout();
                 break;
             case WM_CONTEXTMENU:
-            case WM_RBUTTONUP:
                 ContextMenu();
                 break;
             }
             return 0;
         case WM_ACTIVATE:
-            if (LOWORD(wp) == WA_INACTIVE && IsWindowVisible(hwnd)) HideFlyout();
+            if (LOWORD(wp) == WA_INACTIVE && IsWindowVisible(hwnd))
+            {
+                TrayLog(L"flyout deactivated -> hide");
+                HideFlyout();
+            }
             return 0;
         case WM_KEYDOWN:
             if (wp == VK_ESCAPE) HideFlyout();
@@ -476,6 +514,7 @@ namespace tray
         ChangeWindowMessageFilterEx(g_flyout, g_taskbarCreated, MSGFLT_ALLOW, nullptr);
         ChangeWindowMessageFilterEx(g_flyout, WM_COMMAND, MSGFLT_ALLOW, nullptr);
         AddTrayIcon();
+        TrayLog(L"tray started (icon added)");
         return true;
     }
 

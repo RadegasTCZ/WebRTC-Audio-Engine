@@ -5,8 +5,12 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <mmdeviceapi.h>
+#include <functiondiscoverykeys_devpkey.h>
+#include <propvarutil.h>
 #include <array>
 #include <string>
+#include <vector>
 #include "../src/Settings.h"
 #include "App.h"
 
@@ -15,8 +19,86 @@ namespace
     enum : int
     {
         IDC_FIRST = 100, IDC_AEC_ON, IDC_AEC_STRENGTH, IDC_NS_ON, IDC_NS_LEVEL, IDC_AGC_ON, IDC_AGC_PRESET,
-        IDC_CLEANUP, IDC_LIM_ON, IDC_GAIN_MODE, IDC_DEFAULTS, IDC_SOUND_SETTINGS, IDC_STATUS, IDC_GAIN_NOTE
+        IDC_CLEANUP, IDC_LIM_ON, IDC_GAIN_MODE, IDC_DEFAULTS, IDC_SOUND_SETTINGS, IDC_STATUS, IDC_GAIN_NOTE,
+        IDC_DEVICE, IDC_CUSTOM, IDC_SCOPE_NOTE
     };
+    // Controls that edit settings (disabled while a microphone follows the defaults).
+    constexpr int kSettingControls[] = {IDC_AEC_ON, IDC_AEC_STRENGTH, IDC_NS_ON, IDC_NS_LEVEL, IDC_AGC_ON, IDC_AGC_PRESET,
+                                        IDC_CLEANUP, IDC_LIM_ON, IDC_GAIN_MODE};
+
+    // ---------------------------------------------------------------- microphones
+    // "Default (all microphones)" + every active microphone that has WebRTC Audio Engine selected,
+    // + microphones that have custom settings saved (even if not in use right now).
+    struct Mic { std::wstring guid, name; };
+    std::vector<Mic> g_mics;   // [0] = defaults (empty guid)
+    constexpr wchar_t kOurPack[] = L"{9879C461-0BA4-4A7B-9F35-3C04EAC1772D}";
+    constexpr PROPERTYKEY kSelectedPack = {{0xc876062a, 0xa276, 0x4ed6, {0xb1, 0x5b, 0x39, 0x62, 0xe6, 0x90, 0x07, 0xf8}}, 2};
+
+    void FindMics()
+    {
+        g_mics.clear();
+        g_mics.push_back({L"", L"Default (all microphones)"});
+        IMMDeviceEnumerator* en = nullptr;
+        if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                                       reinterpret_cast<void**>(&en))))
+        {
+            IMMDeviceCollection* col = nullptr;
+            if (SUCCEEDED(en->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &col)))
+            {
+                UINT n = 0;
+                col->GetCount(&n);
+                for (UINT i = 0; i < n; ++i)
+                {
+                    IMMDevice* dev = nullptr;
+                    IPropertyStore* ps = nullptr;
+                    LPWSTR id = nullptr;
+                    if (SUCCEEDED(col->Item(i, &dev)) && SUCCEEDED(dev->GetId(&id)) && SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &ps)))
+                    {
+                        PROPVARIANT pack, name;
+                        PropVariantInit(&pack);
+                        PropVariantInit(&name);
+                        ps->GetValue(kSelectedPack, &pack);
+                        ps->GetValue(PKEY_Device_FriendlyName, &name);
+                        const bool ours = pack.vt == VT_LPWSTR && _wcsicmp(pack.pwszVal, kOurPack) == 0;
+                        if (ours)
+                        {
+                            const wchar_t* brace = wcsrchr(id, L'{');
+                            g_mics.push_back({brace ? brace : id, name.vt == VT_LPWSTR ? name.pwszVal : L"Microphone"});
+                        }
+                        PropVariantClear(&pack);
+                        PropVariantClear(&name);
+                    }
+                    if (ps) ps->Release();
+                    if (id) CoTaskMemFree(id);
+                    if (dev) dev->Release();
+                }
+                col->Release();
+            }
+            en->Release();
+        }
+        // Microphones with saved custom settings that are not in the list yet.
+        HKEY devices = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, (std::wstring(settings::kRegistryPath) + L"\\Devices").c_str(), 0,
+                          KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE, &devices) == ERROR_SUCCESS)
+        {
+            wchar_t sub[128];
+            for (DWORD i = 0;; ++i)
+            {
+                DWORD len = 128;
+                if (RegEnumKeyExW(devices, i, sub, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+                bool known = false;
+                for (const Mic& m : g_mics) known |= _wcsicmp(m.guid.c_str(), sub) == 0;
+                if (known || !Settings::IsDeviceCustom(sub)) continue;
+                wchar_t name[128] = L"Microphone (not in use)";
+                DWORD size = sizeof(name);
+                RegGetValueW(devices, sub, L"Name", RRF_RT_REG_SZ, nullptr, name, &size);
+                g_mics.push_back({sub, name});
+            }
+            RegCloseKey(devices);
+        }
+    }
+
+    const wchar_t* SelectedGuid();  // nullptr = defaults
 
     // AGC presets from the AEC3-Echo-Canceller plugin: headroom, max gain, speed, noise ceiling.
     struct AgcPreset { const wchar_t* name; int headroom, maxGain, speed, noise; };
@@ -62,20 +144,56 @@ namespace
         return 3;  // Custom
     }
 
+    const wchar_t* SelectedGuid()
+    {
+        const int i = Sel(IDC_DEVICE);
+        return (i > 0 && i < static_cast<int>(g_mics.size())) ? g_mics[static_cast<size_t>(i)].guid.c_str() : nullptr;
+    }
+    // Where edits go: the selected microphone if it has custom settings, otherwise the defaults.
+    // A microphone that follows the defaults shows them read-only.
+    bool Editable() { return !SelectedGuid() || Checked(IDC_CUSTOM); }
+    const wchar_t* Scope() { return SelectedGuid() && Checked(IDC_CUSTOM) ? SelectedGuid() : nullptr; }
+
+    void PopulateDeviceCombo()
+    {
+        const std::wstring keep = SelectedGuid() ? SelectedGuid() : L"";
+        FindMics();
+        HWND combo = Item(IDC_DEVICE);
+        SendMessageW(combo, CB_RESETCONTENT, 0, 0);
+        int sel = 0;
+        for (size_t i = 0; i < g_mics.size(); ++i)
+        {
+            std::wstring label = g_mics[i].name;
+            if (i > 0 && Settings::IsDeviceCustom(g_mics[i].guid.c_str())) label += L"  (custom)";
+            SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+            if (!keep.empty() && _wcsicmp(keep.c_str(), g_mics[i].guid.c_str()) == 0) sel = static_cast<int>(i);
+        }
+        SetSel(IDC_DEVICE, sel);
+    }
+
     // Turning everything off is Windows' own job (Audio enhancements: Off), so there is no master switch.
     void UpdateEnabledStates()
     {
-        EnableWindow(Item(IDC_AEC_STRENGTH), Checked(IDC_AEC_ON));
-        EnableWindow(Item(IDC_NS_LEVEL), Checked(IDC_NS_ON));
-        EnableWindow(Item(IDC_AGC_PRESET), Checked(IDC_AGC_ON));
-        EnableWindow(Item(IDC_GAIN_MODE), !Checked(IDC_AGC_ON));
+        const bool edit = Editable();
+        for (int id : kSettingControls) EnableWindow(Item(id), edit);
+        EnableWindow(Item(IDC_AEC_STRENGTH), edit && Checked(IDC_AEC_ON));
+        EnableWindow(Item(IDC_NS_LEVEL), edit && Checked(IDC_NS_ON));
+        EnableWindow(Item(IDC_AGC_PRESET), edit && Checked(IDC_AGC_ON));
+        EnableWindow(Item(IDC_GAIN_MODE), edit && !Checked(IDC_AGC_ON));
+        EnableWindow(Item(IDC_DEFAULTS), edit);
+        const bool mic = SelectedGuid() != nullptr;
+        ShowWindow(Item(IDC_CUSTOM), mic ? SW_SHOW : SW_HIDE);
+        SetWindowTextW(Item(IDC_SCOPE_NOTE), !mic                   ? L"These settings apply to every microphone without custom settings."
+                                             : Checked(IDC_CUSTOM) ? L"This microphone uses its own settings."
+                                                                   : L"This microphone follows the default settings.");
         ShowWindow(Item(IDC_GAIN_NOTE), Checked(IDC_AGC_ON) ? SW_SHOW : SW_HIDE);
     }
 
     void LoadUi()
     {
         g_updating = true;
-        g_current = Settings::ReadFromRegistry();
+        SetChecked(IDC_CUSTOM, SelectedGuid() && Settings::IsDeviceCustom(SelectedGuid()));
+        g_current = Settings::ReadFromRegistry(Scope());
         const Settings& s = g_current;
         SetChecked(IDC_AEC_ON, s.aecEnabled);
         SetSel(IDC_AEC_STRENGTH, static_cast<int>(s.aecStrength));
@@ -97,9 +215,9 @@ namespace
 
     void SaveFromUi(int changedId)
     {
-        if (g_updating)
+        if (g_updating || !Editable())
             return;
-        Settings s = Settings::ReadFromRegistry();  // keep values the window does not show (frequencies, AGC details)
+        Settings s = Settings::ReadFromRegistry(Scope());  // keep values the window does not show (frequencies, AGC details)
         s.aecEnabled = Checked(IDC_AEC_ON);
         s.aecStrength = static_cast<uint32_t>(Sel(IDC_AEC_STRENGTH));
         s.nsEnabled = Checked(IDC_NS_ON);
@@ -115,7 +233,7 @@ namespace
         s.lpfEnabled = (cleanup & 2) ? 1u : 0u;
         s.limiterEnabled = Checked(IDC_LIM_ON);
         s.gainMode = static_cast<uint32_t>(Sel(IDC_GAIN_MODE));
-        const LONG err = Settings::WriteToRegistry(s);
+        const LONG err = Settings::WriteToRegistry(s, Scope());
         if (err == ERROR_SUCCESS)
             Status(L"Saved. Changes apply immediately.");
         else if (err == ERROR_FILE_NOT_FOUND)
@@ -135,6 +253,13 @@ namespace
         y += 36;
         Ctl(L"BUTTON", L"Open sound settings", BS_PUSHBUTTON, 16, y, 150, 26, IDC_SOUND_SETTINGS);
         y += 40;
+        Ctl(L"STATIC", L"Microphone", SS_LEFT, 16, y + 4, 90, 20, 0, true);
+        Ctl(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 110, y, 274, 240, IDC_DEVICE);
+        y += 32;
+        Ctl(L"BUTTON", L"Custom settings for this microphone", BS_AUTOCHECKBOX, 16, y, 368, 22, IDC_CUSTOM);
+        y += 24;
+        Ctl(L"STATIC", L"", SS_LEFT, 16, y, 368, 20, IDC_SCOPE_NOTE);
+        y += 28;
 
         auto section = [&](const wchar_t* title, int height) {
             Ctl(L"BUTTON", title, BS_GROUPBOX, 16, y, 368, height, 0, true);
@@ -188,15 +313,29 @@ namespace
             const int id = LOWORD(wp), code = HIWORD(wp);
             if (id == IDC_SOUND_SETTINGS)
                 ShellExecuteW(hwnd, L"open", L"ms-settings:sound", nullptr, nullptr, SW_SHOWNORMAL);
+            else if (id == IDC_DEVICE && code == CBN_DROPDOWN)
+                PopulateDeviceCombo();  // microphones may have started/stopped using the effect pack
+            else if (id == IDC_DEVICE && code == CBN_SELCHANGE)
+                LoadUi();
+            else if (id == IDC_CUSTOM && code == BN_CLICKED)
+            {
+                const int i = Sel(IDC_DEVICE);
+                const LONG err = Settings::SetDeviceCustom(SelectedGuid(), Checked(IDC_CUSTOM), g_mics[static_cast<size_t>(i)].name.c_str());
+                const int keep = i;
+                PopulateDeviceCombo();
+                SetSel(IDC_DEVICE, keep);
+                LoadUi();
+                Status(err == ERROR_SUCCESS ? L"Saved." : L"Could not save (run the install script once as administrator).");
+            }
             else if (id == IDC_DEFAULTS)
             {
                 Settings d{};
                 d.bypass = 0;  // defaults also clear a scripted A/B bypass
-                const LONG err = Settings::WriteToRegistry(d);
+                const LONG err = Settings::WriteToRegistry(d, Scope());
                 LoadUi();
                 Status(err == ERROR_SUCCESS ? L"Defaults restored." : L"Could not save settings.");
             }
-            else if ((code == BN_CLICKED && id > IDC_FIRST) || code == CBN_SELCHANGE)
+            else if ((code == BN_CLICKED && id > IDC_FIRST && id != IDC_CUSTOM) || (code == CBN_SELCHANGE && id != IDC_DEVICE))
                 SaveFromUi(id);
             return 0;
         }
@@ -221,6 +360,7 @@ namespace
 
 void app::ShowMainWindow()
 {
+    PopulateDeviceCombo();
     LoadUi();
     ShowWindow(g_wnd, SW_RESTORE);
     ShowWindow(g_wnd, SW_SHOW);
@@ -253,6 +393,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
         return 0;
     }
 
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // device enumeration (MMDevice API)
     INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icc);
 
@@ -274,12 +415,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
     g_bold = CreateFontIndirectW(&bold);
 
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc{0, 0, S(400), S(606)};
+    RECT rc{0, 0, S(400), S(690)};
     AdjustWindowRectExForDpi(&rc, style, FALSE, 0, g_dpi);
     g_wnd = CreateWindowExW(0, wc.lpszClassName, L"WebRTC Audio Engine Settings", style, CW_USEDEFAULT, CW_USEDEFAULT,
                             rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);
     ChangeWindowMessageFilterEx(g_wnd, g_showMsg, MSGFLT_ALLOW, nullptr);  // a non-elevated second launch may ask us to show
     BuildUi();
+    PopulateDeviceCombo();
     LoadUi();
     Status(L"Changes apply immediately.");
     tray::Init(inst);
@@ -300,7 +442,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
         const DWORD r = MsgWaitForMultipleObjects(1, &changed, FALSE, INFINITE, QS_ALLINPUT);
         if (r == WAIT_OBJECT_0)
         {
-            if (!(Settings::ReadFromRegistry() == g_current))
+            if (!(Settings::ReadFromRegistry(Scope()) == g_current))
                 LoadUi();
             tray::SettingsChanged();
             if (key) RegNotifyChangeKeyValue(key, FALSE, REG_NOTIFY_CHANGE_LAST_SET, changed, TRUE);

@@ -10,8 +10,8 @@
 // real-time path; slots are claimed on non-real-time threads.
 namespace telemetry
 {
-    inline constexpr wchar_t kSectionName[] = L"Global\\WebrtcAudioEngineTelemetry2";
-    inline constexpr uint32_t kVersion = 2;
+    inline constexpr wchar_t kSectionName[] = L"Global\\WebrtcAudioEngineTelemetry3";
+    inline constexpr uint32_t kVersion = 3;
     inline constexpr int kMaxSlots = 8;
     inline constexpr uint64_t kSlotStaleMs = 5000;  // a slot not updated for this long may be reused
 
@@ -33,6 +33,7 @@ namespace telemetry
         volatile uint32_t seq;        // odd while the writer updates
         volatile uint64_t tickMs;     // GetTickCount64 of the last update
         wchar_t name[64];             // endpoint friendly name (written when claimed)
+        wchar_t device[64];           // endpoint GUID "{...}" (per-device settings key)
         Values values;
     };
 
@@ -45,11 +46,12 @@ namespace telemetry
     struct Device
     {
         wchar_t name[64];
+        wchar_t device[64];
         Values values;
     };
 
     // Writer side (audio effect). Claim is non-RT; Publish is RT-safe.
-    Slot* ClaimSlot(const wchar_t* endpointId, const wchar_t* friendlyName) noexcept;
+    Slot* ClaimSlot(const wchar_t* endpointId, const wchar_t* friendlyName, const wchar_t* deviceGuid) noexcept;
     void Publish(Slot* slot, const Values& values) noexcept;
 
     // Reader side (app): fills up to kMaxSlots devices updated within maxAgeMs; returns the count.

@@ -30,9 +30,15 @@ struct Settings
 
     bool operator==(const Settings&) const = default;
 
-    static Settings ReadFromRegistry() noexcept;  // missing values keep their defaults; clamps ranges
-    // Writes every value (the settings app). Returns a Win32 error code (ERROR_SUCCESS on success).
-    static LONG WriteToRegistry(const Settings& s) noexcept;
+    // Defaults live in HKLM\SOFTWARE\WebrtcVoiceApo; a microphone with custom settings has its own full
+    // set under ...\Devices\{endpoint-guid} (value "Custom" = 1). device = nullptr -> the defaults.
+    static Settings ReadFromRegistry(const wchar_t* device = nullptr) noexcept;  // clamps ranges
+    // Writes every value (settings app / effect). Returns a Win32 error code (ERROR_SUCCESS on success).
+    static LONG WriteToRegistry(const Settings& s, const wchar_t* device = nullptr) noexcept;
+    static bool IsDeviceCustom(const wchar_t* device) noexcept;
+    // custom = true: the microphone gets its own settings (starting from the current defaults the first
+    // time); false: it follows the defaults again (its custom values are kept for next time).
+    static LONG SetDeviceCustom(const wchar_t* device, bool custom, const wchar_t* name = nullptr) noexcept;
 };
 
 namespace settings
@@ -43,8 +49,14 @@ namespace settings
     void EnsureWatcher() noexcept;
     bool WatcherStarted() noexcept;
 
-    // Lock-free read of the latest snapshot (safe on the real-time thread).
-    Settings Current() noexcept;
+    inline constexpr int kMaxDevices = 8;
+
+    // Non-RT: start tracking a microphone (endpoint GUID "{...}"); returns its index for Current(),
+    // or -1 when the table is full (that microphone then follows the defaults).
+    int RegisterDevice(const wchar_t* device) noexcept;
+
+    // Lock-free read of the latest snapshot (safe on the real-time thread). -1 = the defaults.
+    Settings Current(int deviceIndex = -1) noexcept;
 
     // For tests: publish a snapshot directly.
     void Publish(const Settings& s) noexcept;

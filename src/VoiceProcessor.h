@@ -56,6 +56,8 @@ public:
     // Echo reference (48 kHz mono ring filled by the auxiliary input). nullptr = this stream has none.
     // Call before Prepare or between Deactivate and Prepare (non-RT).
     void SetReference(ReferenceRing* ring) noexcept { m_refRing = ring; }
+    // Which settings snapshot this processor follows (settings::RegisterDevice; -1 = defaults).
+    void SetSettingsIndex(int index) noexcept { m_settingsIndex = index; }
 
     int LatencyFrames() const noexcept { return m_latencyFrames; }
     int SampleRate() const noexcept { return m_rate; }
@@ -129,6 +131,7 @@ private:
 
     bool m_active = false;
     bool m_registered = false;
+    int m_settingsIndex = -1;
     int m_channels = 0;
     int m_pos = 0;
     std::vector<Channel> m_ch;

@@ -1,20 +1,29 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 #include "Settings.h"
 #include "Log.h"
 #include <algorithm>
 #include <cstring>
+#include <cwchar>
+#include <string>
 #include <type_traits>
 
 static_assert(std::is_trivially_copyable_v<Settings>);
 
 namespace
 {
-    // Seqlock: single writer (watcher callback), many lock-free readers.
-    // Fields are stored as relaxed atomics so concurrent reads are well-defined.
+    // One seqlock snapshot for the defaults (index -1 -> slot 0) and one per registered device.
+    // Single writer (registration / watcher callback), many lock-free readers.
     constexpr size_t kWords = sizeof(Settings) / sizeof(uint32_t);
     static_assert(sizeof(Settings) % sizeof(uint32_t) == 0);
-    std::atomic<uint32_t> g_seq{0};
-    std::atomic<uint32_t> g_words[kWords];
-    std::atomic<bool> g_initialised{false};
+    struct Snapshot
+    {
+        std::atomic<uint32_t> seq{0};
+        std::atomic<uint32_t> words[kWords];
+        std::atomic<bool> valid{false};
+        wchar_t device[64]{};  // endpoint GUID ("{...}"); empty for the defaults slot
+    };
+    Snapshot g_snap[1 + settings::kMaxDevices];  // [0] = defaults
+    SRWLOCK g_snapLock = SRWLOCK_INIT;            // guards device registration (non-RT only)
 
     std::atomic<bool> g_watcherStarted{false};
     std::atomic<settings::ChangeHook> g_hook{nullptr};
@@ -22,84 +31,172 @@ namespace
     HANDLE g_event = nullptr;
     HANDLE g_wait = nullptr;
 
+    void Store(Snapshot& snap, const Settings& s) noexcept
+    {
+        uint32_t words[kWords];
+        std::memcpy(words, &s, sizeof(s));
+        const uint32_t seq = snap.seq.load(std::memory_order_relaxed);
+        snap.seq.store(seq + 1, std::memory_order_relaxed);  // odd: write in progress
+        std::atomic_thread_fence(std::memory_order_release);
+        for (size_t i = 0; i < kWords; ++i)
+            snap.words[i].store(words[i], std::memory_order_relaxed);
+        snap.seq.store(seq + 2, std::memory_order_release);  // even: stable
+        snap.valid.store(true, std::memory_order_release);
+    }
+
+    Settings Load(const Snapshot& snap) noexcept
+    {
+        if (!snap.valid.load(std::memory_order_acquire))
+            return Settings{};
+        uint32_t words[kWords];
+        for (;;)
+        {
+            const uint32_t s1 = snap.seq.load(std::memory_order_acquire);
+            if (s1 & 1u)
+                continue;  // writer active; it finishes within microseconds
+            for (size_t i = 0; i < kWords; ++i)
+                words[i] = snap.words[i].load(std::memory_order_relaxed);
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (snap.seq.load(std::memory_order_relaxed) == s1)
+                break;
+        }
+        Settings s;
+        std::memcpy(&s, words, sizeof(s));
+        return s;
+    }
+
+    std::wstring DevicePath(const wchar_t* device)
+    {
+        return std::wstring(settings::kRegistryPath) + L"\\Devices\\" + device;
+    }
+
+    // Applies every value present under `path` onto `s` (missing values keep what `s` has).
+    void ReadValues(const wchar_t* path, Settings& s) noexcept
+    {
+        auto read = [path](const wchar_t* name, uint32_t& value) {
+            DWORD v = 0, size = sizeof(v);
+            if (RegGetValueW(HKEY_LOCAL_MACHINE, path, name, RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS)
+                value = v;
+        };
+        auto readInt = [&](const wchar_t* name, int32_t& value) {
+            uint32_t v = static_cast<uint32_t>(value);
+            read(name, v);
+            value = static_cast<int32_t>(v);
+        };
+        read(L"Bypass", s.bypass);
+        read(L"HpfEnabled", s.hpfEnabled);   // older key; CleanupFilters below wins when present
+        read(L"HpfHz", s.hpfHz);
+        uint32_t cleanup = 0xFFFFFFFFu;
+        read(L"CleanupFilters", cleanup);
+        if (cleanup <= 3)
+        {
+            s.hpfEnabled = (cleanup & 1u) ? 1u : 0u;
+            s.lpfEnabled = (cleanup & 2u) ? 1u : 0u;
+        }
+        read(L"LpfHz", s.lpfHz);
+        read(L"NsEnabled", s.nsEnabled);
+        read(L"NsLevel", s.nsLevel);
+        read(L"GainMode", s.gainMode);
+        read(L"AgcEnabled", s.agcEnabled);
+        readInt(L"AgcHeadroomDb", s.agcHeadroomDb);
+        readInt(L"AgcMaxGainDb", s.agcMaxGainDb);
+        readInt(L"AgcSpeedDbPerSec", s.agcSpeedDbPerSec);
+        readInt(L"AgcNoiseCeilingDbfs", s.agcNoiseCeilingDbfs);
+        read(L"LimiterEnabled", s.limiterEnabled);
+        read(L"AecEnabled", s.aecEnabled);
+        read(L"AecStrength", s.aecStrength);
+    }
+
+    Settings Sanitised(Settings s) noexcept
+    {
+        s.bypass = s.bypass ? 1u : 0u;
+        s.hpfEnabled = s.hpfEnabled ? 1u : 0u;
+        s.lpfEnabled = s.lpfEnabled ? 1u : 0u;
+        s.nsEnabled = s.nsEnabled ? 1u : 0u;
+        s.agcEnabled = s.agcEnabled ? 1u : 0u;
+        s.limiterEnabled = s.limiterEnabled ? 1u : 0u;
+        s.aecEnabled = s.aecEnabled ? 1u : 0u;
+        s.hpfHz = std::clamp<uint32_t>(s.hpfHz, 20, 300);
+        s.lpfHz = std::clamp<uint32_t>(s.lpfHz, 8000, 16000);
+        if (s.nsLevel > 3) s.nsLevel = 1;
+        if (s.gainMode > 2) s.gainMode = 0;
+        if (s.aecStrength > 2) s.aecStrength = 1;
+        s.agcHeadroomDb = std::clamp(s.agcHeadroomDb, 0, 20);
+        s.agcMaxGainDb = std::clamp(s.agcMaxGainDb, 1, 50);
+        s.agcSpeedDbPerSec = std::clamp(s.agcSpeedDbPerSec, 1, 30);
+        s.agcNoiseCeilingDbfs = std::clamp(s.agcNoiseCeilingDbfs, -80, -20);
+        return s;
+    }
+
+    void Log(const wchar_t* who, const Settings& s) noexcept
+    {
+        apolog::Write(L"[settings %s] bypass=%u lpf=%u@%uHz hpf=%u@%uHz ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u aec=%u strength=%u",
+                      who, s.bypass, s.lpfEnabled, s.lpfHz, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel, s.gainMode, s.agcEnabled,
+                      s.agcHeadroomDb, s.agcMaxGainDb, s.agcSpeedDbPerSec, s.agcNoiseCeilingDbfs, s.limiterEnabled, s.aecEnabled,
+                      s.aecStrength);
+    }
+
     void Arm() noexcept
     {
+        // Watch the whole tree: per-device subkeys live under Devices\.
         if (g_key)
-            RegNotifyChangeKeyValue(g_key, FALSE, REG_NOTIFY_CHANGE_LAST_SET, g_event, TRUE);
+            RegNotifyChangeKeyValue(g_key, TRUE, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME, g_event, TRUE);
     }
 
     void CALLBACK OnChanged(PVOID, BOOLEAN) noexcept
     {
-        const Settings s = Settings::ReadFromRegistry();
-        const Settings old = settings::Current();
-        settings::Publish(s);
-        if (!(s == old))
+        bool any = false;
+        AcquireSRWLockShared(&g_snapLock);
+        for (int i = 0; i <= settings::kMaxDevices; ++i)
         {
-            apolog::Write(L"[settings] bypass=%u lpf=%u@%uHz hpf=%u@%uHz ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u aec=%u strength=%u",
-                          s.bypass, s.lpfEnabled, s.lpfHz, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel, s.gainMode, s.agcEnabled, s.agcHeadroomDb,
-                          s.agcMaxGainDb, s.agcSpeedDbPerSec, s.agcNoiseCeilingDbfs, s.limiterEnabled, s.aecEnabled, s.aecStrength);
-            if (auto hook = g_hook.load())
-                hook(s);
+            Snapshot& snap = g_snap[i];
+            if (i > 0 && snap.device[0] == 0)
+                continue;
+            const Settings s = Settings::ReadFromRegistry(i == 0 ? nullptr : snap.device);
+            const Settings old = Load(snap);
+            Store(snap, s);
+            if (!(s == old))
+            {
+                any = true;
+                Log(i == 0 ? L"default" : snap.device, s);
+            }
         }
+        ReleaseSRWLockShared(&g_snapLock);
+        if (any)
+            if (auto hook = g_hook.load())
+                hook(settings::Current());
         Arm();
     }
 }
 
-Settings Settings::ReadFromRegistry() noexcept
+bool Settings::IsDeviceCustom(const wchar_t* device) noexcept
 {
-    Settings s;
-    auto read = [](const wchar_t* name, uint32_t& value) {
-        DWORD v = 0, size = sizeof(v);
-        if (RegGetValueW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, name, RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS)
-            value = v;
-    };
-    read(L"Bypass", s.bypass);
-    read(L"HpfEnabled", s.hpfEnabled);   // older key; CleanupFilters below wins when present
-    read(L"HpfHz", s.hpfHz);
-    uint32_t cleanup = 0xFFFFFFFFu;
-    read(L"CleanupFilters", cleanup);
-    if (cleanup <= 3)
-    {
-        s.hpfEnabled = (cleanup & 1u) ? 1u : 0u;
-        s.lpfEnabled = (cleanup & 2u) ? 1u : 0u;
-    }
-    read(L"LpfHz", s.lpfHz);
-    s.lpfHz = std::clamp<uint32_t>(s.lpfHz, 8000, 16000);
-    read(L"NsEnabled", s.nsEnabled);
-    read(L"NsLevel", s.nsLevel);
-    read(L"GainMode", s.gainMode);
-    if (s.gainMode > 2) s.gainMode = 0;
-    auto readInt = [&](const wchar_t* name, int32_t& value, int32_t lo, int32_t hi) {
-        uint32_t v = static_cast<uint32_t>(value);
-        read(name, v);
-        value = std::clamp(static_cast<int32_t>(v), lo, hi);
-    };
-    read(L"AgcEnabled", s.agcEnabled);
-    readInt(L"AgcHeadroomDb", s.agcHeadroomDb, 0, 20);
-    readInt(L"AgcMaxGainDb", s.agcMaxGainDb, 1, 50);
-    readInt(L"AgcSpeedDbPerSec", s.agcSpeedDbPerSec, 1, 30);
-    readInt(L"AgcNoiseCeilingDbfs", s.agcNoiseCeilingDbfs, -80, -20);
-    read(L"LimiterEnabled", s.limiterEnabled);
-    read(L"AecEnabled", s.aecEnabled);
-    read(L"AecStrength", s.aecStrength);
-    s.aecEnabled = s.aecEnabled ? 1u : 0u;
-    if (s.aecStrength > 2) s.aecStrength = 1;
-    s.agcEnabled = s.agcEnabled ? 1u : 0u;
-    s.limiterEnabled = s.limiterEnabled ? 1u : 0u;
-
-    s.bypass = s.bypass ? 1u : 0u;
-    s.hpfEnabled = s.hpfEnabled ? 1u : 0u;
-    s.nsEnabled = s.nsEnabled ? 1u : 0u;
-    s.hpfHz = std::clamp<uint32_t>(s.hpfHz, 20, 300);
-    if (s.nsLevel > 3) s.nsLevel = 1;
-    return s;
+    if (!device || !*device)
+        return false;
+    DWORD v = 0, size = sizeof(v);
+    return RegGetValueW(HKEY_LOCAL_MACHINE, DevicePath(device).c_str(), L"Custom", RRF_RT_REG_DWORD, nullptr, &v, &size) ==
+               ERROR_SUCCESS &&
+           v != 0;
 }
 
-LONG Settings::WriteToRegistry(const Settings& s) noexcept
+Settings Settings::ReadFromRegistry(const wchar_t* device) noexcept
+{
+    Settings s;
+    ReadValues(settings::kRegistryPath, s);           // defaults for every microphone
+    if (IsDeviceCustom(device))
+        ReadValues(DevicePath(device).c_str(), s);    // this microphone's own values
+    return Sanitised(s);
+}
+
+LONG Settings::WriteToRegistry(const Settings& s, const wchar_t* device) noexcept
 {
     HKEY key = nullptr;
-    // KEY_SET_VALUE only: Users have SetValue on this key (created by the install scripts).
-    LONG err = RegOpenKeyExW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, 0, KEY_SET_VALUE, &key);
+    LONG err;
+    if (device && *device)
+        // Users / the audio engine may create subkeys under Devices (install scripts set the ACL).
+        err = RegCreateKeyExW(HKEY_LOCAL_MACHINE, DevicePath(device).c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
+    else
+        err = RegOpenKeyExW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, 0, KEY_SET_VALUE, &key);
     if (err != ERROR_SUCCESS)
         return err;
     auto put = [&](const wchar_t* name, uint32_t v) {
@@ -127,40 +224,60 @@ LONG Settings::WriteToRegistry(const Settings& s) noexcept
     return err;
 }
 
+LONG Settings::SetDeviceCustom(const wchar_t* device, bool custom, const wchar_t* name) noexcept
+{
+    if (!device || !*device)
+        return ERROR_INVALID_PARAMETER;
+    if (custom && !IsDeviceCustom(device))
+    {
+        // Start from what the microphone uses right now (the defaults).
+        const LONG e = WriteToRegistry(ReadFromRegistry(nullptr), device);
+        if (e != ERROR_SUCCESS)
+            return e;
+    }
+    HKEY key = nullptr;
+    LONG err = RegCreateKeyExW(HKEY_LOCAL_MACHINE, DevicePath(device).c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
+    if (err != ERROR_SUCCESS)
+        return err;
+    const DWORD v = custom ? 1u : 0u;
+    err = RegSetValueExW(key, L"Custom", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
+    if (name && *name)
+        RegSetValueExW(key, L"Name", 0, REG_SZ, reinterpret_cast<const BYTE*>(name),
+                       static_cast<DWORD>((wcslen(name) + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    return err;
+}
+
 namespace settings
 {
-    void Publish(const Settings& s) noexcept
+    void Publish(const Settings& s) noexcept { Store(g_snap[0], s); }
+
+    Settings Current(int deviceIndex) noexcept
     {
-        uint32_t words[kWords];
-        std::memcpy(words, &s, sizeof(s));
-        const uint32_t seq = g_seq.load(std::memory_order_relaxed);
-        g_seq.store(seq + 1, std::memory_order_relaxed);  // odd: write in progress
-        std::atomic_thread_fence(std::memory_order_release);
-        for (size_t i = 0; i < kWords; ++i)
-            g_words[i].store(words[i], std::memory_order_relaxed);
-        g_seq.store(seq + 2, std::memory_order_release);  // even: stable
-        g_initialised.store(true, std::memory_order_release);
+        if (deviceIndex >= 0 && deviceIndex < kMaxDevices && g_snap[1 + deviceIndex].valid.load(std::memory_order_acquire))
+            return Load(g_snap[1 + deviceIndex]);
+        return Load(g_snap[0]);
     }
 
-    Settings Current() noexcept
+    int RegisterDevice(const wchar_t* device) noexcept
     {
-        if (!g_initialised.load(std::memory_order_acquire))
-            return Settings{};
-        uint32_t words[kWords];
-        for (;;)
-        {
-            const uint32_t s1 = g_seq.load(std::memory_order_acquire);
-            if (s1 & 1u)
-                continue;  // writer active; it finishes within microseconds
-            for (size_t i = 0; i < kWords; ++i)
-                words[i] = g_words[i].load(std::memory_order_relaxed);
-            std::atomic_thread_fence(std::memory_order_acquire);
-            if (g_seq.load(std::memory_order_relaxed) == s1)
-                break;
-        }
-        Settings s;
-        std::memcpy(&s, words, sizeof(s));
-        return s;
+        if (!device || !*device)
+            return -1;
+        AcquireSRWLockExclusive(&g_snapLock);
+        int idx = -1;
+        for (int i = 0; i < kMaxDevices && idx < 0; ++i)
+            if (_wcsicmp(g_snap[1 + i].device, device) == 0)
+                idx = i;
+        for (int i = 0; i < kMaxDevices && idx < 0; ++i)
+            if (g_snap[1 + i].device[0] == 0)
+            {
+                wcsncpy_s(g_snap[1 + i].device, device, _TRUNCATE);
+                idx = i;
+            }
+        if (idx >= 0)
+            Store(g_snap[1 + idx], Settings::ReadFromRegistry(device));
+        ReleaseSRWLockExclusive(&g_snapLock);
+        return idx;  // -1: table full -> this device follows the defaults
     }
 
     bool WatcherStarted() noexcept { return g_watcherStarted.load(); }
@@ -172,7 +289,7 @@ namespace settings
         bool expected = false;
         if (!g_watcherStarted.compare_exchange_strong(expected, true))
             return;
-        Publish(Settings::ReadFromRegistry());
+        Publish(Settings::ReadFromRegistry(nullptr));
         // The key may not exist yet (defaults apply); then we only have the initial snapshot.
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kRegistryPath, 0, KEY_NOTIFY | KEY_QUERY_VALUE, &g_key) != ERROR_SUCCESS)
         {

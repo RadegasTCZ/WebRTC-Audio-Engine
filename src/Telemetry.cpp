@@ -51,13 +51,16 @@ namespace telemetry
         }
     }
 
-    Slot* ClaimSlot(const wchar_t* endpointId, const wchar_t* friendlyName) noexcept
+    Slot* ClaimSlot(const wchar_t* endpointId, const wchar_t* friendlyName, const wchar_t* deviceGuid) noexcept
     {
         Section* s = OpenSection();
         if (!s)
             return nullptr;
         const LONG64 key = KeyOf(endpointId);
-        auto setName = [&](Slot& slot) { wcsncpy_s(slot.name, friendlyName ? friendlyName : L"Microphone", _TRUNCATE); };
+        auto setName = [&](Slot& slot) {
+            wcsncpy_s(slot.name, friendlyName ? friendlyName : L"Microphone", _TRUNCATE);
+            wcsncpy_s(slot.device, deviceGuid ? deviceGuid : L"", _TRUNCATE);
+        };
         for (Slot& slot : s->slots)  // same device already has a slot (another stream of it)
             if (slot.key == key) { setName(slot); return &slot; }
         const uint64_t now = GetTickCount64();
@@ -109,6 +112,7 @@ namespace telemetry
                     std::atomic_thread_fence(std::memory_order_acquire);
                     Device d{};
                     std::memcpy(d.name, slot.name, sizeof(d.name));
+                    std::memcpy(d.device, slot.device, sizeof(d.device));
                     std::memcpy(&d.values, const_cast<const Values*>(&slot.values), sizeof(Values));
                     const uint64_t tick = slot.tickMs;
                     std::atomic_thread_fence(std::memory_order_acquire);
