@@ -17,6 +17,8 @@ param(
     [string]$EndpointId,
     [ValidateSet('MFX', 'EFX')][string[]]$Slots = @('MFX', 'EFX'),
     [string]$DllPath,
+    # Experiment: make OUR APO the only EFX (removes Realtek's endpoint effect; uninstall restores it).
+    [switch]$ReplaceEfx,
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -32,14 +34,20 @@ $name = $props.GetValue('{a45c254e-df1c-4efd-8020-67d146a850e0},2')
 
 $targets = @()
 if ($Slots -contains 'MFX') { $targets += [pscustomobject]@{ Slot = 'MFX'; Value = $PKEY_CompositeMfx; Clsid = $ClsidMfx } }
-if ($Slots -contains 'EFX') { $targets += [pscustomobject]@{ Slot = 'EFX'; Value = $PKEY_CompositeEfx; Clsid = $ClsidEfx } }
+if ($Slots -contains 'EFX') { $targets += [pscustomobject]@{ Slot = 'EFX'; Value = $PKEY_CompositeEfx; Clsid = $ClsidEfx; Replace = [bool]$ReplaceEfx } }
+
+function Get-NewList($t, $cur) {
+    if ($t.Replace) { return @($t.Clsid) }
+    $new = @($cur | Where-Object { $_ }); if ($new -notcontains $t.Clsid) { $new += $t.Clsid }
+    $new
+}
 
 Write-Host "Endpoint : $name  $EndpointId"
 Write-Host "DLL      : $DllPath -> $InstallDir"
 foreach ($t in $targets) {
     $cur = Get-MultiSz $fx $t.Value
-    $new = @($cur | Where-Object { $_ }) ; if ($new -notcontains $t.Clsid) { $new += $t.Clsid }
-    Write-Host "$($t.Slot) list ($($t.Value)):"
+    $new = Get-NewList $t $cur
+    Write-Host "$($t.Slot) list ($($t.Value))$(if ($t.Replace) { '  [REPLACING existing effects]' }):"
     Write-Host "   now : $(if ($cur) { $cur -join ', ' } else { '(not set)' })"
     Write-Host "   new : $($new -join ', ')"
 }
@@ -99,8 +107,7 @@ try {
 
     # ---- 4. Append to the endpoint's composite lists
     foreach ($t in $targets) {
-        $list = @(Get-MultiSz $fx $t.Value | Where-Object { $_ })
-        if ($list -notcontains $t.Clsid) { $list += $t.Clsid }
+        $list = Get-NewList $t (Get-MultiSz $fx $t.Value)
         $fx.SetValue($t.Value, [string[]]$list, 'MultiString')
         Write-Host "$($t.Slot): registered."
     }
