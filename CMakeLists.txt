@@ -37,8 +37,8 @@ target_compile_options(voice_core PRIVATE /W3 /guard:cf)
 target_link_libraries(voice_core PUBLIC webrtc_apm settings_core)
 
 # --- Settings app (a normal desktop app: it DOES get a manifest, unlike the APO DLL)
-add_executable(WebrtcAudioEngineSettings WIN32 app/SettingsApp.cpp app/SettingsApp.manifest)
-target_link_libraries(WebrtcAudioEngineSettings PRIVATE settings_core comctl32 shell32 user32 gdi32)
+add_executable(WebrtcAudioEngineSettings WIN32 app/SettingsApp.cpp app/TrayFlyout.cpp app/App.h app/SettingsApp.manifest)
+target_link_libraries(WebrtcAudioEngineSettings PRIVATE settings_core comctl32 shell32 user32 gdi32 dwmapi)
 target_compile_options(WebrtcAudioEngineSettings PRIVATE /W4 /permissive- /guard:cf)
 target_link_options(WebrtcAudioEngineSettings PRIVATE /guard:cf)
 

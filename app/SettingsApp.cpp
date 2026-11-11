@@ -8,6 +8,7 @@
 #include <array>
 #include <string>
 #include "../src/Settings.h"
+#include "App.h"
 
 namespace
 {
@@ -23,6 +24,7 @@ namespace
         {L"Gentle", 8, 20, 3, -60}, {L"Normal", 5, 30, 6, -50}, {L"Strong", 3, 50, 10, -45}}};
 
     HWND g_wnd = nullptr;
+    UINT g_showMsg = 0;          // "show your settings window" (sent by a second launch)
     HFONT g_font = nullptr, g_bold = nullptr;
     UINT g_dpi = 96;
     bool g_updating = false;   // true while the UI is being filled from the registry
@@ -198,6 +200,9 @@ namespace
                 SaveFromUi(id);
             return 0;
         }
+        case WM_CLOSE:
+            ShowWindow(hwnd, SW_HIDE);  // keep running in the tray
+            return 0;
         case WM_CTLCOLORSTATIC:
             SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
             return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
@@ -205,21 +210,46 @@ namespace
             PostQuitMessage(0);
             return 0;
         }
+        if (msg == g_showMsg && g_showMsg)
+        {
+            app::ShowMainWindow();
+            return 0;
+        }
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
 }
 
-int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
+void app::ShowMainWindow()
 {
-    // Single instance: bring the existing window to the front.
+    LoadUi();
+    ShowWindow(g_wnd, SW_RESTORE);
+    ShowWindow(g_wnd, SW_SHOW);
+    SetForegroundWindow(g_wnd);
+}
+
+void app::ExitApp()
+{
+    tray::Shutdown();
+    DestroyWindow(g_wnd);  // WM_DESTROY -> PostQuitMessage
+}
+
+// "WebrtcAudioEngineSettings.exe"        : tray + open the settings window
+// "WebrtcAudioEngineSettings.exe /tray"  : tray only (started at sign-in)
+int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
+{
+    const bool trayOnly = cmdLine && wcsstr(cmdLine, L"/tray") != nullptr;
+    g_showMsg = RegisterWindowMessageW(L"WebrtcAudioEngine.ShowSettings");
+
+    // Single instance: a second launch asks the running one to show its window.
     CreateMutexW(nullptr, TRUE, L"WebrtcAudioEngineSettings.SingleInstance");
     if (GetLastError() == ERROR_ALREADY_EXISTS)
     {
-        if (HWND other = FindWindowW(L"WebrtcAudioEngineSettings", nullptr))
-        {
-            ShowWindow(other, SW_RESTORE);
-            SetForegroundWindow(other);
-        }
+        if (!trayOnly)
+            if (HWND other = FindWindowW(L"WebrtcAudioEngineSettings", nullptr))
+            {
+                AllowSetForegroundWindow(ASFW_ANY);
+                PostMessageW(other, g_showMsg, 0, 0);
+            }
         return 0;
     }
 
@@ -232,7 +262,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
     wc.lpszClassName = L"WebrtcAudioEngineSettings";
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);  // (window icon; the tray icon is drawn in TrayFlyout.cpp)
     RegisterClassExW(&wc);
 
     g_dpi = GetDpiForSystem();
@@ -251,7 +281,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
     BuildUi();
     LoadUi();
     Status(L"Changes apply immediately.");
-    ShowWindow(g_wnd, show);
+    tray::Init(inst);
+    if (!trayOnly)
+        ShowWindow(g_wnd, show);
 
     // Refresh when the settings change elsewhere (scripts, another tool).
     HKEY key = nullptr;
@@ -269,6 +301,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int show)
         {
             if (!(Settings::ReadFromRegistry() == g_current))
                 LoadUi();
+            tray::SettingsChanged();
             if (key) RegNotifyChangeKeyValue(key, FALSE, REG_NOTIFY_CHANGE_LAST_SET, changed, TRUE);
             continue;
         }
