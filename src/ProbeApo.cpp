@@ -579,9 +579,10 @@ STDMETHODIMP_(void) CProbeApo::AcceptInput(DWORD dwInputId, const APO_CONNECTION
 namespace
 {
     constexpr GUID kEffectAec = {0x6f64adbe, 0x8211, 0x11e2, {0x8c, 0x70, 0x2c, 0x27, 0xd7, 0xf0, 0x01, 0xfa}};  // ACOUSTIC_ECHO_CANCELLATION
-    // Our noise suppression is reported as DEEP_NOISE_SUPPRESSION: the only effect type the Settings page
-    // (AudioHandlers.dll) has UI for; it shows it as "Voice Focus" (Microsoft's fixed name and description).
-    constexpr GUID kEffectNs = {0x6f64add0, 0x8211, 0x11e2, {0x8c, 0x70, 0x2c, 0x27, 0xd7, 0xf0, 0x01, 0xfa}};   // DEEP_NOISE_SUPPRESSION
+    // Note: the Settings page (AudioHandlers.dll, build 26300) only draws effect rows for Microsoft's own
+    // Voice Clarity pack (its pack id is hard-coded); other packs only get name + author. We still report
+    // honest effect types for any other consumer of this interface.
+    constexpr GUID kEffectNs = {0x6f64adbf, 0x8211, 0x11e2, {0x8c, 0x70, 0x2c, 0x27, 0xd7, 0xf0, 0x01, 0xfa}};   // NOISE_SUPPRESSION
     constexpr GUID kEffectAgc = {0x6f64adc0, 0x8211, 0x11e2, {0x8c, 0x70, 0x2c, 0x27, 0xd7, 0xf0, 0x01, 0xfa}};  // AUTOMATIC_GAIN_CONTROL
 
     // Events handed to us by GetControllableSystemEffectsList: signalled when our effect states change.
