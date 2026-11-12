@@ -25,6 +25,21 @@ namespace
     CRegAPOProperties<1> g_regPack(CLSID_WebrtcAudioEnginePack, L"WebRTC Audio Engine", L"Copyright (c) RadegasTCZ",
                                    1, 0, __uuidof(IAudioProcessingObject), APO_FLAG_DEFAULT);
 
+    // True the first time an interface ID is seen in this process. Every effect instance gets asked about
+    // the same optional interfaces, so logging each one once keeps the log readable. No allocation.
+    bool FirstUnsupportedQuery(REFIID riid) noexcept
+    {
+        static SRWLOCK lock = SRWLOCK_INIT;
+        static GUID seen[128];
+        static size_t count = 0;
+        AcquireSRWLockExclusive(&lock);
+        bool first = count < std::size(seen) && std::find(seen, seen + count, riid) == seen + count;
+        if (first)
+            seen[count++] = riid;
+        ReleaseSRWLockExclusive(&lock);
+        return first;
+    }
+
     const wchar_t* ModeName(REFGUID m) noexcept
     {
         struct { GUID g; const wchar_t* name; } static const table[] = {
@@ -105,9 +120,12 @@ HRESULT CEngineApo::NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcep
     else
     {
         // Useful for discovery: shows which optional interfaces (CAPX, AEC, ...) the engine asks for.
-        wchar_t g[40];
-        apolog::GuidToString(riid, g);
-        apolog::Write(L"[%s #%ld] QueryInterface for unsupported %s", SlotName(), m_instanceId, g);
+        if (FirstUnsupportedQuery(riid))
+        {
+            wchar_t g[40];
+            apolog::GuidToString(riid, g);
+            apolog::Write(L"[%s #%ld] QueryInterface for unsupported %s (logged once per audio engine run)", SlotName(), m_instanceId, g);
+        }
         return E_NOINTERFACE;
     }
     AddRef();  // goes to the outer object when aggregated (COM aggregation rule)
@@ -357,9 +375,19 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
 {
     const double seconds = (GetTickCount64() - m_lockTick) / 1000.0;
     if (m_refActive.load())
-        apolog::Write(L"[%s #%ld] echo reference: calls=%llu frames=%llu (%.1f s) silentCalls=%llu dropped=%llu, AEC3 %s, reference underruns=%llu", SlotName(),
-                      m_instanceId, m_refCalls.load(), m_refFrames.load(), m_refFrames.load() / 48000.0, m_refSilentCalls.load(), m_refDropped.load(),
-                      m_proc.HasAec() ? L"running" : L"not running", m_proc.ReferenceUnderruns());
+    {
+        // "dropped": reference that arrived while capture was paused (the queue keeps at most 1 s).
+        // "blocks without reference": capture blocks processed with silence as reference, i.e. the
+        // speakers were idle or paused (nothing to cancel), not a fault.
+        if (m_refCalls.load() == 0)
+            apolog::Write(L"[%s #%ld] echo reference: none arrived (speakers idle), AEC3 %s", SlotName(), m_instanceId,
+                          m_proc.HasAec() ? L"running" : L"not running");
+        else
+            apolog::Write(L"[%s #%ld] echo reference: %.1f s received in %llu calls (%llu silent), %.1f s dropped while capture was paused, "
+                          L"%llu capture blocks without reference (speakers idle/paused), AEC3 %s", SlotName(), m_instanceId,
+                          m_refFrames.load() / 48000.0, m_refCalls.load(), m_refSilentCalls.load(), m_refDropped.load() / 48000.0,
+                          m_proc.ReferenceUnderruns(), m_proc.HasAec() ? L"running" : L"not running");
+    }
     if (m_proc.HasAec() && m_echoTimeline.HasData())
         m_echoTimeline.Report([this](const char* line) { apolog::Write(L"[%s #%ld] %hs", SlotName(), m_instanceId, line); });
     const double peakDb = m_peak > 0.0f ? 20.0 * std::log10(static_cast<double>(m_peak)) : -999.0;
