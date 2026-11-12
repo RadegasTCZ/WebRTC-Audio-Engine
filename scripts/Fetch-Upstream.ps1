@@ -18,13 +18,20 @@ $chromiumRev = '6eabe54fa1'                                 # chromium/src/third
 function Get-Archive([string]$url, [string]$dest) {
     if ((Test-Path $dest) -and -not $Force) { Write-Host "  have $dest"; return }
     if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
-    New-Item -ItemType Directory -Force $dest | Out-Null   # each archive into its own empty directory
+    # Extract into a new empty folder next to the destination and rename it only when everything worked:
+    # a failed download never leaves a folder that the next run would take as complete.
+    $part = "$dest.partial"
+    if (Test-Path $part) { Remove-Item $part -Recurse -Force }
+    New-Item -ItemType Directory -Force $part | Out-Null
     $tmp = Join-Path $env:TEMP ("upstream-" + [guid]::NewGuid() + ".tar.gz")
     Write-Host "  fetch $url"
-    Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
-    & tar.exe -xzf $tmp -C $dest
-    if ($LASTEXITCODE) { throw "tar failed for $url" }
-    Remove-Item $tmp
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+        & tar.exe -xzf $tmp -C $part
+        if ($LASTEXITCODE) { throw "tar failed for $url" }
+        Rename-Item $part (Split-Path $dest -Leaf)
+    }
+    finally { Remove-Item $tmp -Force -EA SilentlyContinue }
 }
 
 function Get-TextFile([string]$url, [string]$dest) {

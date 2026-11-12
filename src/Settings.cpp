@@ -149,6 +149,9 @@ namespace
 
     void CALLBACK OnChanged(PVOID, BOOLEAN) noexcept
     {
+        // Re-arm first, then read: a value written while we read fires the next notification instead of
+        // being missed (writers set several values in a row; the first one wakes us up).
+        Arm();
         bool any = false;
         AcquireSRWLockShared(&g_snapLock);
         for (int i = 0; i <= settings::kMaxDevices; ++i)
@@ -169,7 +172,6 @@ namespace
         if (any)
             if (auto hook = g_hook.load())
                 hook(settings::Current());
-        Arm();
     }
 }
 

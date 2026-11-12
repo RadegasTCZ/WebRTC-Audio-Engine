@@ -5,12 +5,13 @@
 // component installs, or by Install-SettingsApp.ps1 from an admin shell. Copies this exe to Program Files,
 // adds the Start-menu shortcut, the tray icon at sign-in (HKLM Run), an Apps & features entry, prepares
 // the settings key (Users may change values) and starts the tray icon for the signed-in users.
-// /uninstall: from Apps & features (hands over to a temporary copy, which asks for admin rights) or the
-// scripts (which run it from a temporary copy themselves). Undoes all of that except the settings.
+// /uninstall: from Apps & features (asks for admin rights) or the scripts. Undoes all of that except the
+// settings. The running exe cannot be deleted, so it is moved into the protected log folder and deleted
+// at the next restart (never copied to a user-writable folder and run elevated from there).
 //
-// Closing running copies: the installer bumps AppGeneration in the settings key; every running copy
-// watches that key (all sessions, any elevation) and exits when it changes. Copies too old to know this
-// are ended by force as a last resort.
+// Closing running copies: the installer bumps AppGeneration in HKLM\SOFTWARE\WebrtcAudioEngine (only
+// admins may write it); every running copy watches that key (all sessions, any elevation) and exits
+// when it changes. Copies too old to know this are ended by force as a last resort.
 // A short log goes to %ProgramData%\WebrtcAudioEngine\setup.log (folder writable by SYSTEM and admins only).
 #include "App.h"
 #include <aclapi.h>
@@ -236,12 +237,12 @@ namespace
         return list;
     }
 
-    // Asks every running copy to exit (AppGeneration changes; they watch the settings key) and waits for
+    // Asks every running copy to exit (AppGeneration changes; they watch the app key) and waits for
     // them; copies that do not react within 5 s (builds before AppGeneration) are ended by force.
     void CloseRunningApps()
     {
         HKEY k = nullptr;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, 0, KEY_SET_VALUE, &k) == ERROR_SUCCESS)
+        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, app::kAppKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS)
         {
             SetDword(k, app::kGenerationValue, app::AppGeneration() + 1);
             RegCloseKey(k);
@@ -368,10 +369,48 @@ namespace
     }
 }
 
+namespace
+{
+    // Deletes a file that may still be running (an exe in use cannot be deleted, but it can be moved):
+    // moves it into the protected log folder and deletes it at the next restart. True if it is gone
+    // from `path`.
+    bool RemoveFile(const std::wstring& path)
+    {
+        if (DeleteFileW(path.c_str())) return true;
+        DWORD err = GetLastError();
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) return true;
+        if (!LogDir().empty())
+        {
+            const std::wstring parked = LogDir() + L"\\removed-" + std::to_wstring(GetTickCount64()) + L".exe";
+            if (MoveFileExW(path.c_str(), parked.c_str(), MOVEFILE_REPLACE_EXISTING))
+            {
+                MoveFileExW(parked.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+                return true;
+            }
+            err = GetLastError();
+        }
+        Log(L"could not remove %s (error %lu)", path.c_str(), err);
+        SetLastError(err);
+        return false;
+    }
+
+    // Exes parked by RemoveFile that are no longer running.
+    void CleanParked()
+    {
+        if (LogDir().empty()) return;
+        WIN32_FIND_DATAW fd;
+        HANDLE f = FindFirstFileW((LogDir() + L"\\removed-*.exe").c_str(), &fd);
+        if (f == INVALID_HANDLE_VALUE) return;
+        do DeleteFileW((LogDir() + L"\\" + fd.cFileName).c_str());
+        while (FindNextFileW(f, &fd));
+        FindClose(f);
+    }
+}
+
 DWORD app::AppGeneration()
 {
     DWORD v = 0, size = sizeof(v);
-    RegGetValueW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, kGenerationValue, RRF_RT_REG_DWORD, nullptr, &v, &size);
+    RegGetValueW(HKEY_LOCAL_MACHINE, kAppKey, kGenerationValue, RRF_RT_REG_DWORD, nullptr, &v, &size);
     return v;
 }
 
@@ -385,6 +424,7 @@ namespace setup
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
         if (const LONG r = PrepareSettingsKey(); r != ERROR_SUCCESS) Log(L"warning: settings key not prepared (error %ld)", r);
+        CleanParked();
         CloseRunningApps();
         const std::wstring dir = InstallDir(), exe = InstalledExe(), self = SelfPath();
         CreateDirectoryW(dir.c_str(), nullptr);
@@ -392,7 +432,10 @@ namespace setup
         {
             BOOL copied = FALSE;
             for (int i = 0; i < 20 && !(copied = CopyFileW(self.c_str(), exe.c_str(), FALSE)); ++i)
-                Sleep(250);  // a closed copy can keep the file locked for a moment
+            {
+                if (i == 8) RemoveFile(exe);  // still in use after 2 s (a copy we could not close): move it aside
+                Sleep(250);                   // a closed copy can keep the file locked for a moment
+            }
             if (!copied)
             {
                 const DWORD e = GetLastError();
@@ -444,16 +487,8 @@ namespace setup
     int Uninstall()
     {
         const std::wstring self = SelfPath();
-        // Started from Program Files (Apps & features): this exe cannot delete itself while it runs. Hand over
-        // to a temporary copy (it asks for admin rights) and exit, so the copy can remove the folder.
-        if (_wcsicmp(self.c_str(), InstalledExe().c_str()) == 0)
-        {
-            wchar_t tmp[MAX_PATH];
-            GetTempPathW(MAX_PATH, tmp);
-            const std::wstring copy = std::wstring(tmp) + L"WebrtcAudioEngine-uninstall-" + std::to_wstring(GetCurrentProcessId()) + L".exe";
-            if (!CopyFileW(self.c_str(), copy.c_str(), FALSE)) return static_cast<int>(GetLastError());
-            return static_cast<int>(Run(copy, L"/uninstall /selfdelete", !Elevated(), false));
-        }
+        // From Apps & features: not elevated. Ask for admin rights and run this same exe (in Program Files,
+        // which only admins can change) again.
         if (!Elevated()) return static_cast<int>(Run(self, L"/uninstall", true, true));
 
         Log(L"uninstall from %s", self.c_str());
@@ -467,22 +502,17 @@ namespace setup
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, kUninstallKey);
         DeleteFileW(ShortcutPath().c_str());
 
-        // The copy in Program Files may still be running for a moment (the Apps & features process that
-        // handed over to us): retry for up to 15 s.
+        // We (and the Apps & features process waiting for us) may be running from this exe: RemoveFile moves it
+        // out of the way and deletes it at the next restart.
         const std::wstring exe = InstalledExe();
-        DWORD err = ERROR_SUCCESS;
-        for (int i = 0; i < 60; ++i)
+        if (!RemoveFile(exe))
         {
-            if (DeleteFileW(exe.c_str()) || (err = GetLastError()) == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) { err = ERROR_SUCCESS; break; }
-            Sleep(250);
+            const DWORD err = GetLastError();
+            Log(L"failed: could not remove %s (error %lu)", exe.c_str(), err);
+            return static_cast<int>(err ? err : ERROR_ACCESS_DENIED);
         }
         RemoveDirectoryW(InstallDir().c_str());
-        if (wcsstr(GetCommandLineW(), L"/selfdelete")) MoveFileExW(self.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
-        if (err != ERROR_SUCCESS)
-        {
-            Log(L"failed: could not delete %s (error %lu)", exe.c_str(), err);
-            return static_cast<int>(err);
-        }
+        RegDeleteKeyW(HKEY_LOCAL_MACHINE, app::kAppKey);
         Log(L"uninstalled (settings kept)");
         return 0;
     }

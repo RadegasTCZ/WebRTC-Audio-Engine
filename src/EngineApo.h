@@ -107,8 +107,10 @@ private:
     // Mic volume slider: the pack replaces the OEM chain, which on laptop codecs applied the slider
     // in software. We apply it ourselves unless the device's volume is in hardware (USB/Bluetooth).
     IMMDevice* m_device = nullptr;       // our endpoint (from Initialize), for notifications
-    bool m_hardwareVolumeBus = false;    // USB / Bluetooth endpoint
+    bool m_hardwareVolumeBus = false;    // USB / Bluetooth endpoint (fallback guess)
+    int m_hardwareVolume = -1;           // endpoint reports a hardware volume control: 1/0, -1 unknown
     std::atomic<float> m_sliderDb{0.0f};
+    std::atomic<bool> m_muted{false};    // endpoint mute (we replace the chain that applied it)
     float SliderGainDb(const Settings& s) const noexcept;
 
     // Echo reference (render loopback) from the auxiliary input, downmixed to mono.
@@ -123,6 +125,7 @@ private:
     std::atomic<uint64_t> m_refFrames{0}, m_refCalls{0}, m_refDropped{0}, m_refSilentCalls{0};
 
     ::telemetry::Slot* m_telemetry = nullptr;  // this device's shared-memory meters for the tray app
+    LONG64 m_telemetryKey = 0;
     wchar_t m_endpointName[64] = L"Microphone";
     wchar_t m_endpointKey[128] = L"";
     wchar_t m_deviceGuid[64] = L"";   // endpoint GUID, the key for per-device settings

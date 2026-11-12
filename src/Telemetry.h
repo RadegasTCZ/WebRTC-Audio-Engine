@@ -53,7 +53,9 @@ namespace telemetry
 
     // Writer side (audio effect). Claim is non-RT; Publish is RT-safe.
     Slot* ClaimSlot(const wchar_t* endpointId, const wchar_t* friendlyName, const wchar_t* deviceGuid) noexcept;
-    void Publish(Slot* slot, const Values& values) noexcept;
+    LONG64 KeyOf(const wchar_t* endpointId) noexcept;           // the slot key for an endpoint id
+    bool Owns(const Slot* slot, LONG64 key) noexcept;           // the slot still belongs to that endpoint
+    void Publish(Slot* slot, LONG64 key, const Values& values) noexcept;
 
     // Reader side (app): fills up to kMaxSlots devices updated within maxAgeMs; returns the count.
     int ReadAll(Device (&out)[kMaxSlots], uint64_t maxAgeMs = 1500) noexcept;

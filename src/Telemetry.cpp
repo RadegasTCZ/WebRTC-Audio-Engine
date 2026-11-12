@@ -15,11 +15,11 @@ namespace telemetry
             static std::atomic<Section*> s_section{nullptr};
             if (Section* s = s_section.load())
                 return s;
-            // SYSTEM + LOCAL SERVICE + app containers (audiodg) full access; Users, Admins read only.
+            // SYSTEM full; LOCAL SERVICE + app containers (audiodg) read/write (no WRITE_DAC); Users, Admins read.
             SECURITY_ATTRIBUTES sa{sizeof(sa)};
             PSECURITY_DESCRIPTOR sd = nullptr;
             if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                    L"D:(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;AC)(A;;GA;;;S-1-15-2-2)(A;;GR;;;BU)(A;;GR;;;BA)", SDDL_REVISION_1,
+                    L"D:(A;;GA;;;SY)(A;;GRGW;;;LS)(A;;GRGW;;;AC)(A;;GRGW;;;S-1-15-2-2)(A;;GR;;;BU)(A;;GR;;;BA)", SDDL_REVISION_1,
                     &sd, nullptr))
                 return nullptr;
             sa.lpSecurityDescriptor = sd;
@@ -44,13 +44,16 @@ namespace telemetry
             return s;
         }
 
-        LONG64 KeyOf(const wchar_t* id) noexcept
-        {
-            uint64_t h = 1469598103934665603ull;  // FNV-1a
-            for (; id && *id; ++id) { h ^= static_cast<uint16_t>(*id); h *= 1099511628211ull; }
-            return static_cast<LONG64>(h ? h : 1);
-        }
     }
+
+    LONG64 KeyOf(const wchar_t* id) noexcept
+    {
+        uint64_t h = 1469598103934665603ull;  // FNV-1a
+        for (; id && *id; ++id) { h ^= static_cast<uint16_t>(*id); h *= 1099511628211ull; }
+        return static_cast<LONG64>(h ? h : 1);
+    }
+
+    bool Owns(const Slot* slot, LONG64 key) noexcept { return slot && slot->key == key; }
 
     Slot* ClaimSlot(const wchar_t* endpointId, const wchar_t* friendlyName, const wchar_t* deviceGuid) noexcept
     {
@@ -71,24 +74,28 @@ namespace telemetry
             if ((old == 0 || now - slot.tickMs > kSlotStaleMs) && InterlockedCompareExchange64(&slot.key, key, old) == old)
             {
                 setName(slot);
-                slot.tickMs = 0;
+                slot.tickMs = now;  // fresh: not stale for another device until it stops publishing
+                slot.seq &= ~1u;    // never inherit a half-finished update
                 return &slot;
             }
         }
         return nullptr;  // more than kMaxSlots active devices: no meters for this one
     }
 
-    void Publish(Slot* slot, const Values& v) noexcept
+    // Several streams of one microphone share its slot: a writer takes the slot by moving seq from even
+    // to odd with a compare-exchange, and skips this update (no waiting: real-time) if another writer
+    // holds it or the slot now belongs to another device.
+    void Publish(Slot* slot, LONG64 key, const Values& v) noexcept
     {
-        if (!slot)
+        if (!slot || slot->key != key)
             return;
         const uint32_t s = slot->seq;
-        slot->seq = s + 1;
-        std::atomic_thread_fence(std::memory_order_release);
+        if ((s & 1u) || static_cast<uint32_t>(InterlockedCompareExchange(reinterpret_cast<volatile LONG*>(&slot->seq),
+                                                                          static_cast<LONG>(s + 1), static_cast<LONG>(s))) != s)
+            return;
         slot->values = v;
         slot->tickMs = GetTickCount64();
-        std::atomic_thread_fence(std::memory_order_release);
-        slot->seq = s + 2;
+        InterlockedExchange(reinterpret_cast<volatile LONG*>(&slot->seq), static_cast<LONG>(s + 2));  // full barrier
     }
 
     int ReadAll(Device (&out)[kMaxSlots], uint64_t maxAgeMs) noexcept

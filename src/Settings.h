@@ -49,7 +49,7 @@ namespace settings
     void EnsureWatcher() noexcept;
     bool WatcherStarted() noexcept;
 
-    inline constexpr int kMaxDevices = 8;
+    inline constexpr int kMaxDevices = 32;  // distinct microphones per audiodg lifetime with their own snapshot
 
     // Non-RT: start tracking a microphone (endpoint GUID "{...}"); returns its index for Current(),
     // or -1 when the table is full (that microphone then follows the defaults).

@@ -725,9 +725,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
         ShowWindow(g_wnd, show);
 
     // Refresh when the settings change elsewhere (scripts, another tool), including the per-microphone
-    // subkeys. If the key does not exist yet, look again every few seconds. AppGeneration changing means
-    // the installer is replacing or removing the app: exit.
+    // subkeys. If the key does not exist yet, look again every few seconds.
+    // The installer replacing or removing the app bumps AppGeneration in the app key: then exit.
     const DWORD generation = app::AppGeneration();
+    HKEY appKey = nullptr;
+    HANDLE appChanged = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    auto watchApp = [&] {
+        if (!appKey && RegOpenKeyExW(HKEY_LOCAL_MACHINE, app::kAppKey, 0, KEY_NOTIFY | KEY_QUERY_VALUE, &appKey) != ERROR_SUCCESS)
+        {
+            appKey = nullptr;
+            return;
+        }
+        RegNotifyChangeKeyValue(appKey, FALSE, REG_NOTIFY_CHANGE_LAST_SET, appChanged, TRUE);
+    };
+    watchApp();
     HKEY key = nullptr;
     HANDLE changed = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     auto watch = [&] {
@@ -745,20 +756,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
     MSG m;
     for (;;)
     {
-        const DWORD r = MsgWaitForMultipleObjects(1, &changed, FALSE, key ? INFINITE : 5000, QS_ALLINPUT);
-        if (r == WAIT_OBJECT_0 || (r == WAIT_TIMEOUT && watch()))
+        const HANDLE events[] = {changed, appChanged};
+        const DWORD r = MsgWaitForMultipleObjects(2, events, FALSE, key && appKey ? INFINITE : 5000, QS_ALLINPUT);
+        if (r == WAIT_OBJECT_0 + 1 || (r == WAIT_TIMEOUT && !appKey))
         {
-            if (app::AppGeneration() != generation)
-            {
+            watchApp();
+            if (appKey && app::AppGeneration() != generation)
                 app::ExitApp();  // WM_QUIT follows
-                continue;
-            }
+            if (r == WAIT_OBJECT_0 + 1) continue;
+        }
+        if (r == WAIT_OBJECT_0 || (r == WAIT_TIMEOUT && !key && watch()))
+        {
+            if (r == WAIT_OBJECT_0) watch();  // re-arm before reading: values written meanwhile notify again
             const bool custom = SelectedGuid() && Settings::IsDeviceCustom(SelectedGuid());
             if (custom != g_custom || !(Settings::ReadFromRegistry(Scope()) == g_current))
                 LoadUi();
             tray::SettingsChanged();
-            if (r == WAIT_OBJECT_0) watch();
-            else { g_status = L"Changes apply immediately."; Redraw(); }  // the settings key showed up
+            if (r != WAIT_OBJECT_0) { g_status = L"Changes apply immediately."; Redraw(); }  // the settings key showed up
             continue;
         }
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))

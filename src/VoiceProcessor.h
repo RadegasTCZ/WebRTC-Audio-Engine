@@ -85,7 +85,9 @@ public:
     }
 
     // Interleaved float32; in and out may alias. `s` applies at the next block boundary.
-    // inputGainDb = mic volume slider gain; ignored (0 dB) while AGC2 is enabled.
+    // inputGainDb = mic volume slider gain; ignored (0 dB) while AGC2 is enabled. kMutedDb = mic muted
+    // (silence, also with AGC2 on).
+    static constexpr float kMutedDb = -1.0e30f;
     void Process(const float* in, float* out, int frames, const Settings& s, float inputGainDb = 0.0f) noexcept;
 
     // Non-RT: rebuild AGC2 / AEC3 if their parameters differ from `s` (settings watcher hook).
@@ -93,6 +95,7 @@ public:
     static void OnSettingsChanged(const Settings& s);  // walks all live processors
 
     static float DbToLinear(float db) noexcept;
+    static float InputGain(float sliderDb, bool agcEnabled) noexcept;
 
 private:
     struct Resampling;

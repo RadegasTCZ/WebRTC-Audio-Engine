@@ -9,7 +9,9 @@ namespace app
 {
     inline constexpr wchar_t kExeName[] = L"WebrtcAudioEngineSettings.exe";
     inline constexpr wchar_t kWindowClass[] = L"WebrtcAudioEngineSettings";  // main window (finds the running copy)
-    // In the settings key: the installer bumps it, every running copy exits when it changes (Setup.cpp).
+    // HKLM key only admins may write (Users read and watch it). AppGeneration in it: the installer bumps it,
+    // every running copy exits when it changes (Setup.cpp).
+    inline constexpr wchar_t kAppKey[] = L"SOFTWARE\\WebrtcAudioEngine";
     inline constexpr wchar_t kGenerationValue[] = L"AppGeneration";
     DWORD AppGeneration();
 

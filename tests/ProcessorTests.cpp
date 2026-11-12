@@ -4,6 +4,7 @@
 #include "rtc_base/cpu_info.h"
 #include <string>
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -604,7 +605,43 @@ int main()
         }
     }
 
-    std::printf("[17] cost per 10 ms block on this machine (informational; the audio thread has 10 ms)\n");
+    std::printf("[17] mic mute and a broken slider value: mute gives silence (also with AGC on); NaN never reaches the output\n");
+    {
+        for (const bool agc : {true, false})
+        {
+            Settings s{};
+            s.agcEnabled = agc ? 1u : 0u;
+            VoiceProcessor p;
+            p.Prepare(kCh, 48000, s);
+            const auto in = Noise(48000 * 2, -20.0f, 11);
+            std::vector<float> out(in.size());
+            for (int pos = 0; pos < 48000 * 2; pos += 480)
+            {
+                const size_t off = static_cast<size_t>(pos) * kCh;
+                p.Process(in.data() + off, out.data() + off, 480, s, VoiceProcessor::kMutedDb);
+            }
+            const double muted = RmsDb(out, out.size() / 2, out.size());
+            std::printf("    AGC %-3s muted: %.1f dBFS\n", agc ? "on" : "off", muted);
+            EXPECT(muted < -100.0, "muted output not silent (%.1f dBFS)", muted);
+        }
+        Settings s{};
+        VoiceProcessor p;
+        p.Prepare(kCh, 48000, s);
+        const auto in = Noise(48000 * 2, -20.0f, 12);
+        std::vector<float> out(in.size());
+        bool finite = true;
+        for (int pos = 0; pos < 48000 * 2; pos += 480)
+        {
+            const size_t off = static_cast<size_t>(pos) * kCh;
+            p.Process(in.data() + off, out.data() + off, 480, s, pos < 48000 ? std::numeric_limits<float>::quiet_NaN() : 0.0f);
+            for (size_t i = off; i < off + 480 * kCh; ++i) finite &= std::isfinite(out[i]);
+        }
+        const double level = RmsDb(out, out.size() / 2, out.size());
+        std::printf("    NaN slider then 0 dB: all samples finite=%d, output %.1f dBFS\n", finite ? 1 : 0, level);
+        EXPECT(finite && level > -60.0, "NaN slider corrupted the output");
+    }
+
+    std::printf("[18] cost per 10 ms block on this machine (informational; the audio thread has 10 ms)\n");
     {
         std::printf("    CPU: AVX2 %s (WebRTC picks its AVX2 kernels at runtime; SSE2 otherwise)\n",
                     webrtc::cpu_info::Supports(webrtc::cpu_info::ISA::kAVX2) ? "detected" : "not detected");

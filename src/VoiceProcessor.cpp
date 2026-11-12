@@ -171,7 +171,15 @@ struct VoiceProcessor::Resampling
 
 float VoiceProcessor::DbToLinear(float db) noexcept
 {
+    if (std::isnan(db)) return 1.0f;  // a broken value from the engine: unity, never NaN into the chain
     return std::pow(10.0f, std::clamp(db, -60.0f, 40.0f) / 20.0f);
+}
+
+// Input gain for the slider value: muted -> 0, AGC on -> unity (AGC2 owns the level), else the slider.
+float VoiceProcessor::InputGain(float sliderDb, bool agcEnabled) noexcept
+{
+    if (sliderDb == kMutedDb) return 0.0f;
+    return DbToLinear(agcEnabled ? 0.0f : sliderDb);
 }
 
 void VoiceProcessor::Biquad::SetHighPass(float hz, float sampleRate) noexcept
@@ -335,8 +343,7 @@ void VoiceProcessor::Reset() noexcept
     m_underruns = 0;
     if (m_rs) m_rs->Reset();
     // Start directly in the requested state (no fade-in from silence).
-    const float gainDb = m_settings.agcEnabled ? 0.0f : m_gainTargetDb;
-    m_gain.current = m_gain.target = DbToLinear(gainDb);
+    m_gain.current = m_gain.target = InputGain(m_gainTargetDb, m_settings.agcEnabled != 0);
     m_hpfMix.current = m_hpfMix.target = m_settings.hpfEnabled ? 1.0f : 0.0f;
     m_lpfMix.current = m_lpfMix.target = m_settings.lpfEnabled ? 1.0f : 0.0f;
     m_nsMix.current = m_nsMix.target = m_settings.nsEnabled ? 1.0f : 0.0f;
@@ -365,7 +372,7 @@ void VoiceProcessor::ApplySettings(const Settings& s) noexcept
     m_agcMix.target = s.agcEnabled ? 1.0f : 0.0f;
     m_limMix.target = s.limiterEnabled ? 1.0f : 0.0f;
     m_wet.target = s.bypass ? 0.0f : 1.0f;
-    m_gain.target = DbToLinear(s.agcEnabled ? 0.0f : m_gainTargetDb);  // AGC2 owns the level when on
+    m_gain.target = InputGain(m_gainTargetDb, s.agcEnabled != 0);  // AGC2 owns the level when on
     if (static_cast<int>(s.nsLevel) != m_level && m_nextLevel < 0)
         m_nextLevel = static_cast<int>(s.nsLevel);
 }
@@ -523,10 +530,11 @@ void VoiceProcessor::ProcessBlock() noexcept
 
 void VoiceProcessor::Process(const float* in, float* out, int frames, const Settings& s, float inputGainDb) noexcept
 {
+    if (std::isnan(inputGainDb)) inputGainDb = 0.0f;
     if (inputGainDb != m_gainTargetDb)
     {
         m_gainTargetDb = inputGainDb;
-        m_gain.target = DbToLinear(m_settings.agcEnabled ? 0.0f : inputGainDb);
+        m_gain.target = InputGain(inputGainDb, m_settings.agcEnabled != 0);
     }
     if (!m_active)
     {

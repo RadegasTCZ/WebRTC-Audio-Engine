@@ -21,6 +21,7 @@ std::atomic<long> CEngineApo::s_nextInstance{0};
 
 namespace
 {
+    constexpr GUID kModeRaw = {0x9E90EA20, 0xB493, 0x4FD1, {0xA1, 0xA8, 0x7E, 0x13, 0x61, 0xA9, 0x56, 0xCF}};
 #pragma warning(disable : 4815) // CRegAPOProperties<1> has a zero-length IID array by design
     CRegAPOProperties<1> g_regPack(CLSID_WebrtcAudioEnginePack, L"WebRTC Audio Engine", L"Copyright (c) RadegasTCZ",
                                    1, 0, __uuidof(IAudioProcessingObject), APO_FLAG_DEFAULT);
@@ -325,15 +326,20 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
         IAudioEndpointVolume* ev = nullptr;
         HRESULT hrv = m_device->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&ev));
         float db = 0.0f;
+        BOOL mute = FALSE;
+        DWORD hw = 0;
         if (SUCCEEDED(hrv) && ev)
         {
             hrv = ev->GetMasterVolumeLevel(&db);
+            if (FAILED(ev->GetMute(&mute))) mute = FALSE;
+            m_hardwareVolume = SUCCEEDED(ev->QueryHardwareSupport(&hw)) ? ((hw & ENDPOINT_HARDWARE_SUPPORT_VOLUME) ? 1 : 0) : -1;
             ev->Release();
         }
-        if (SUCCEEDED(hrv))
+        if (SUCCEEDED(hrv) && std::isfinite(db))
             m_sliderDb.store(db, std::memory_order_relaxed);
-        apolog::Write(L"[%s #%ld] initial slider: hr=0x%08X %.2f dB, hwVolumeBus=%d", SlotName(), m_instanceId, hrv, db,
-                      m_hardwareVolumeBus ? 1 : 0);
+        m_muted.store(mute != FALSE, std::memory_order_relaxed);
+        apolog::Write(L"[%s #%ld] initial slider: hr=0x%08X %.2f dB muted=%d, hardware volume=%d (bus guess %d)", SlotName(),
+                      m_instanceId, hrv, db, mute ? 1 : 0, m_hardwareVolume, m_hardwareVolumeBus ? 1 : 0);
     }
     {
         // Voice processing (only float32 formats; anything else passes through untouched).
@@ -344,13 +350,21 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
         bool ok = false;
         if (!m_isFloat32)
             apolog::Write(L"[%s #%ld] processing off: format is not float32", SlotName(), m_instanceId);
+        else if (IsEqualGUID(m_mode, kModeRaw))
+            apolog::Write(L"[%s #%ld] processing off: RAW stream (unprocessed audio by contract)", SlotName(), m_instanceId);
         else
         {
             const UINT32 maxFrames = std::max(u32NumInputConnections ? ppInputConnections[0]->u32MaxFrameCount : 0u,
                                               u32NumOutputConnections ? ppOutputConnections[0]->u32MaxFrameCount : 0u);
-            m_proc.SetReference(m_refActive.load() ? &m_ref : nullptr);  // echo reference attached by AddAuxiliaryInput
-            if (!m_telemetry)
-                m_telemetry = telemetry::ClaimSlot(m_endpointKey, m_endpointName, m_deviceGuid);  // per-device meters for the tray app (non-RT)
+            // Echo reference attached by AddAuxiliaryInput. If it arrived while the previous stream ran, its ring
+            // could not be allocated then (APOProcess may have been reading it): do it now, before the stream.
+            if (m_refActive.load() && m_ref.Capacity() == 0)
+                m_ref.Init(VoiceProcessor::kSampleRate);
+            m_proc.SetReference(m_refActive.load() ? &m_ref : nullptr);
+            // Per-device meters for the tray app (non-RT). Claim again if another device took our slot meanwhile.
+            m_telemetryKey = telemetry::KeyOf(m_endpointKey);
+            if (!telemetry::Owns(m_telemetry, m_telemetryKey))
+                m_telemetry = telemetry::ClaimSlot(m_endpointKey, m_endpointName, m_deviceGuid);
             ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(std::lround(fmt.fFramesPerSecond)), s,
                                 static_cast<int>(maxFrames ? maxFrames : 4096));
             apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f%s maxFrames=%u latency=%d frames",
@@ -440,7 +454,7 @@ STDMETHODIMP_(void) CEngineApo::APOProcess(UINT32 u32NumInputConnections, APO_CO
                 d.aecRunning = mt.aecRunning ? 1u : 0u;
                 d.speech = mt.speech;
                 d.sampleRate = static_cast<uint32_t>(m_proc.SampleRate());
-                telemetry::Publish(m_telemetry, d);
+                telemetry::Publish(m_telemetry, m_telemetryKey, d);
             }
         }
         float peak = m_peak;
@@ -725,6 +739,8 @@ STDMETHODIMP CEngineApo::SetAudioSystemEffectState(GUID effectId, AUDIO_SYSTEMEF
     const LONG err = Settings::WriteToRegistry(s, scope);  // persists; the watcher applies it live
     apolog::Write(L"[%s #%ld] SetAudioSystemEffectState %s -> %s (registry write %ld)", SlotName(), m_instanceId, name,
                   on ? L"ON" : L"OFF", err);
+    if (err != ERROR_SUCCESS)
+        return HRESULT_FROM_WIN32(err);  // nothing stored: Windows Settings must not show the new state
     SignalSystemEffectsChanged();
     return S_OK;
 }
@@ -733,9 +749,14 @@ STDMETHODIMP CEngineApo::SetAudioSystemEffectState(GUID effectId, AUDIO_SYSTEMEF
 
 float CEngineApo::SliderGainDb(const Settings& s) const noexcept
 {
+    if (m_muted.load(std::memory_order_relaxed))
+        return VoiceProcessor::kMutedDb;  // silence, also with AGC2 on
     if (s.agcEnabled)              // AGC2 owns the level: the slider is ignored (owner's request)
         return 0.0f;
-    const bool apply = s.gainMode == 1 || (s.gainMode == 0 && !m_hardwareVolumeBus);
+    // auto: apply the slider unless the endpoint has its own volume control (reported by Windows; if it
+    // could not say, guessed from the bus: USB/Bluetooth devices have one).
+    const bool hardware = m_hardwareVolume >= 0 ? m_hardwareVolume == 1 : m_hardwareVolumeBus;
+    const bool apply = s.gainMode == 1 || (s.gainMode == 0 && !hardware);
     return apply ? m_sliderDb.load(std::memory_order_relaxed) : 0.0f;
 }
 
@@ -768,7 +789,10 @@ STDMETHODIMP_(void) CEngineApo::HandleNotification(APO_NOTIFICATION* n)
     {
         const auto* v = n->audioEndpointVolumeChange2.volume;
         const bool muted = v->notificationData && v->notificationData->bMuted;
-        m_sliderDb.store(v->masterVolumeInDb, std::memory_order_relaxed);
+        if (std::isfinite(v->masterVolumeInDb))
+            m_sliderDb.store(v->masterVolumeInDb, std::memory_order_relaxed);
+        if (v->notificationData)
+            m_muted.store(muted, std::memory_order_relaxed);
         apolog::Write(L"[%s #%ld] slider %.2f dB (range %.1f..%.1f) muted=%d -> applying %.2f dB",
                       SlotName(), m_instanceId, v->masterVolumeInDb, v->volumeMinInDb, v->volumeMaxInDb, muted ? 1 : 0,
                       SliderGainDb(settings::Current(m_devIdx)));

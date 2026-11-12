@@ -18,13 +18,11 @@ function Invoke-AppSetup([string]$Exe, [string]$Arguments) {
     $p.ExitCode
 }
 
-# Removes the installed settings app (settings are kept). Runs the uninstaller from a temporary copy:
-# the copy in Program Files cannot delete itself.
+# Removes the installed settings app (settings are kept). The exe moves itself out of Program Files
+# (it is deleted at the next restart).
 function Uninstall-SettingsApp {
     if (-not (Test-Path $InstalledAppExe)) { Write-Host 'Settings app is not installed.'; return }
-    $tmp = Join-Path $env:TEMP "WebrtcAudioEngine-uninstall-$PID.exe"
-    Copy-Item $InstalledAppExe $tmp -Force
-    try { $code = Invoke-AppSetup $tmp '/uninstall' } finally { Remove-Item $tmp -Force -EA SilentlyContinue }
+    $code = Invoke-AppSetup $InstalledAppExe '/uninstall'
     if ($code) { throw "Removing the settings app failed (code $code); see $SetupLog" }
     Write-Host 'Settings app removed (settings are kept).'
 }
@@ -42,6 +40,15 @@ function Assert-Admin {
 # service writes files there invites link/redirect tricks. Inheritance from ProgramData (which lets Users
 # create files) is removed.
 function Initialize-LogDir {
+    # icacls below follows links and rewrites rights: refuse a folder that an ordinary user could have
+    # prepared (a junction/link, or owned by someone other than SYSTEM/Administrators).
+    if (Test-Path $LogDir) {
+        $item = Get-Item $LogDir -Force
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$LogDir is a link (junction/symlink): remove it, then run this again." }
+        $owner = (Get-Acl $LogDir).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($owner -notin 'S-1-5-18', 'S-1-5-32-544') { throw "$LogDir is owned by $owner, not SYSTEM/Administrators: remove it, then run this again." }
+        if (Get-ChildItem $LogDir -Force -Recurse -Attributes ReparsePoint) { throw "$LogDir contains links: remove them, then run this again." }
+    }
     New-Item -ItemType Directory -Force $LogDir | Out-Null
     & icacls.exe $LogDir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-19:(OI)(CI)M' `
         '*S-1-15-2-1:(OI)(CI)M' '*S-1-15-2-2:(OI)(CI)M' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
