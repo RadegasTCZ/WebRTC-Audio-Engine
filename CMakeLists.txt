@@ -77,3 +77,9 @@ target_link_libraries(ProcessorTests PRIVATE voice_core)
 add_executable(CaptureTest tests/CaptureTest.cpp)
 target_compile_definitions(CaptureTest PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(CaptureTest PRIVATE ole32 uuid settings_core)
+
+# Plays octave tones and compares the played level with the WASAPI loopback and our echo reference
+# (does speaker processing such as Dolby sit before the reference tap?).
+add_executable(PathProbe tests/PathProbe.cpp)
+target_compile_definitions(PathProbe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(PathProbe PRIVATE ole32 uuid settings_core)
