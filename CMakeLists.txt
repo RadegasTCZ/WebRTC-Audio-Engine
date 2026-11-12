@@ -38,7 +38,18 @@ target_compile_options(voice_core PRIVATE /W3 /guard:cf)
 target_link_libraries(voice_core PUBLIC webrtc_apm settings_core)
 
 # --- Settings app (a normal desktop app: it DOES get a manifest, unlike the APO DLL)
-add_executable(WebrtcAudioEngineSettings WIN32 app/SettingsApp.cpp app/TrayFlyout.cpp app/App.h app/SettingsApp.manifest)
+# App icon: drawn at build time by MakeIcon from app/Glyph.h (the same drawing as the tray icon).
+add_executable(MakeIcon tools/MakeIcon.cpp app/Glyph.h)
+set(APP_ICON_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+add_custom_command(OUTPUT ${APP_ICON_DIR}/WebrtcAudioEngine.ico
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${APP_ICON_DIR}
+    COMMAND MakeIcon ${APP_ICON_DIR}/WebrtcAudioEngine.ico
+    DEPENDS MakeIcon app/Glyph.h
+    COMMENT "Generating the app icon")
+add_executable(WebrtcAudioEngineSettings WIN32 app/SettingsApp.cpp app/TrayFlyout.cpp app/App.h app/Glyph.h
+    app/SettingsApp.manifest app/SettingsApp.rc ${APP_ICON_DIR}/WebrtcAudioEngine.ico)
+target_include_directories(WebrtcAudioEngineSettings PRIVATE ${APP_ICON_DIR})
+set_source_files_properties(app/SettingsApp.rc PROPERTIES OBJECT_DEPENDS ${APP_ICON_DIR}/WebrtcAudioEngine.ico)
 target_link_libraries(WebrtcAudioEngineSettings PRIVATE settings_core comctl32 shell32 user32 gdi32 dwmapi)
 target_compile_options(WebrtcAudioEngineSettings PRIVATE /W4 /permissive- /guard:cf)
 target_link_options(WebrtcAudioEngineSettings PRIVATE /guard:cf)

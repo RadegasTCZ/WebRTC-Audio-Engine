@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// App icon (taskbar, title bar, Alt+Tab, Explorer, Start menu). Generated at build time by
+// tools/MakeIcon.cpp into the build's "generated" folder, which CMake puts on the include path.
+1 ICON "WebrtcAudioEngine.ico"

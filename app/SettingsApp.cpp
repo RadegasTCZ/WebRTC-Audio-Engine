@@ -411,10 +411,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
     wc.lpszClassName = L"WebrtcAudioEngineSettings";
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);  // (window icon; the tray icon is drawn in TrayFlyout.cpp)
+    g_dpi = GetDpiForSystem();
+    // App icon from the resources (SettingsApp.rc); the tray icon is drawn at runtime in TrayFlyout.cpp.
+    wc.hIcon = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetricsForDpi(SM_CXICON, g_dpi),
+                                             GetSystemMetricsForDpi(SM_CYICON, g_dpi), LR_DEFAULTCOLOR));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetricsForDpi(SM_CXSMICON, g_dpi),
+                                               GetSystemMetricsForDpi(SM_CYSMICON, g_dpi), LR_DEFAULTCOLOR));
     RegisterClassExW(&wc);
 
-    g_dpi = GetDpiForSystem();
     NONCLIENTMETRICSW ncm{sizeof(ncm)};
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0, g_dpi);
     g_font = CreateFontIndirectW(&ncm.lfMessageFont);

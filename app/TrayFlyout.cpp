@@ -12,6 +12,7 @@
 #include <string>
 #include "../src/Settings.h"
 #include "../src/Telemetry.h"
+#include "Glyph.h"
 
 namespace
 {
@@ -75,35 +76,8 @@ namespace
             if (color) DeleteObject(color);
             return nullptr;  // no icon this time (out of GDI resources); the tray keeps working
         }
-        auto* px = static_cast<uint32_t*>(bits);
-        std::fill(px, px + size * size, 0u);
-        const uint32_t ink = IsDark() ? 0xFFFFFFFF : 0xFF202020;
-        const float heights[5] = {0.35f, 0.7f, 1.0f, 0.6f, 0.3f};
-        const float barW = size / 8.0f, gap = size / 16.0f;
-        const float total = 5 * barW + 4 * gap, x0 = (size - total) / 2.0f;
-        for (int b = 0; b < 5; ++b)
-        {
-            const float h = heights[b] * size * 0.85f, top = (size - h) / 2.0f;
-            const float xa = x0 + b * (barW + gap);
-            for (int y = 0; y < size; ++y)
-                for (int x = 0; x < size; ++x)
-                {
-                    const float cx = x + 0.5f, cy = y + 0.5f;
-                    // Rounded bar: distance to the bar's centre segment.
-                    const float mx = std::clamp(cx, xa + barW / 2, xa + barW / 2);
-                    const float my = std::clamp(cy, top + barW / 2, top + h - barW / 2);
-                    const float d = std::hypot(cx - mx, cy - my) - barW / 2;
-                    const float a = std::clamp(0.5f - d, 0.0f, 1.0f);
-                    if (a > 0)
-                    {
-                        const uint32_t alpha = static_cast<uint32_t>(a * 255);
-                        const uint32_t c = ink & 0x00FFFFFF;
-                        // premultiplied
-                        const uint32_t r = ((c >> 16) & 0xFF) * alpha / 255, g = ((c >> 8) & 0xFF) * alpha / 255, bl = (c & 0xFF) * alpha / 255;
-                        px[y * size + x] = (alpha << 24) | (r << 16) | (g << 8) | bl;
-                    }
-                }
-        }
+        // Plain bars in the taskbar's text color (no tile: tray icons are monochrome on Windows 11).
+        glyph::Render(size, static_cast<uint32_t*>(bits), IsDark() ? 0xFFFFFF : 0x202020);
         HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
         ICONINFO ii{TRUE, 0, 0, mask, color};
         HICON icon = CreateIconIndirect(&ii);
