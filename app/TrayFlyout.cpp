@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Tray icon + a fontSmall home-brew flyout: quick switches for echo cancellation, noise suppression,
-// automatic gain and cleanup, plus live meters (echo removed, gain) from the audio effect.
-// Everything is drawn with plain GDI and follows the Windows light/dark app theme.
+// Tray icon + a home-brew flyout: pick a microphone, then quick switches for echo cancellation, noise
+// suppression, automatic gain and cleanup, each with an activity dot and a one-line status from the
+// audio effect's live telemetry. Drawn with the shared kit (Ui.h); follows the light/dark theme.
+//
+// Dots: lit = working, amber = holding/waiting, filled grey = switched off, hollow ring = this
+// microphone is not recording, red = the limiter is catching peaks (on the automatic gain row).
 #include "App.h"
-#include <dwmapi.h>
+#include "Ui.h"
 #include <shellapi.h>
 #include <windowsx.h>
 #include <algorithm>
@@ -20,45 +23,19 @@ namespace
     constexpr UINT kTrayId = 1;
     constexpr UINT_PTR kMeterTimer = 1;
     enum MenuCmd : UINT { CMD_OPEN = 1, CMD_EXIT };
+    constexpr wchar_t kPrefsKey[] = L"Software\\WebrtcAudioEngine";  // per user: the flyout's microphone
 
     HINSTANCE g_inst = nullptr;
-
     HWND g_flyout = nullptr;
     HICON g_icon = nullptr;
     NOTIFYICONDATAW g_nid{};
     UINT g_taskbarCreated = 0;
     ULONGLONG g_hiddenAt = 0;  // a click on the tray icon right after the flyout lost focus should not reopen it
 
-    // ---------------------------------------------------------------- theme
-
-    struct Theme
-    {
-        COLORREF bg, card, text, subtle, accent, track, meterBg;
-    };
-    bool IsDark()
-    {
-        DWORD v = 1, size = sizeof(v);
-        RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &v, &size);
-        return v == 0;
-    }
-    Theme CurrentTheme()
-    {
-        DWORD color = 0;
-        BOOL opaque = FALSE;
-        COLORREF accent = RGB(0, 120, 212);
-        if (SUCCEEDED(DwmGetColorizationColor(&color, &opaque)))
-            accent = RGB((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF);
-        if (IsDark())
-            return {RGB(32, 32, 32), RGB(43, 43, 43), RGB(240, 240, 240), RGB(160, 160, 160), accent, RGB(90, 90, 90), RGB(60, 60, 60)};
-        return {RGB(243, 243, 243), RGB(255, 255, 255), RGB(26, 26, 26), RGB(96, 96, 96), accent, RGB(160, 160, 160), RGB(225, 225, 225)};
-    }
-
     // ---------------------------------------------------------------- tray icon (drawn at runtime)
 
     HICON MakeIcon(int size)
     {
-        // A home-brew glyph: five rounded "level" bars, like a voice waveform.
         BITMAPV5HEADER bi{};
         bi.bV5Size = sizeof(bi);
         bi.bV5Width = size;
@@ -77,7 +54,7 @@ namespace
             return nullptr;  // no icon this time (out of GDI resources); the tray keeps working
         }
         // Plain bars in the taskbar's text color (no tile: tray icons are monochrome on Windows 11).
-        glyph::Render(size, static_cast<uint32_t*>(bits), IsDark() ? 0xFFFFFF : 0x202020);
+        glyph::Render(size, static_cast<uint32_t*>(bits), ui::IsDark() ? 0xFFFFFF : 0x202020);
         HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
         ICONINFO ii{TRUE, 0, 0, mask, color};
         HICON icon = CreateIconIndirect(&ii);
@@ -102,26 +79,103 @@ namespace
         Shell_NotifyIconW(NIM_SETVERSION, &g_nid);
     }
 
-    // ---------------------------------------------------------------- flyout layout + drawing
+    // ---------------------------------------------------------------- which microphone
 
-    enum Row { ROW_AEC, ROW_NS, ROW_AGC, ROW_CLEANUP, ROW_COUNT };
-    const wchar_t* kRowNames[ROW_COUNT] = {L"Echo cancellation", L"Noise suppression", L"Automatic gain", L"Cleanup filters"};
+    std::vector<app::Mic> g_mics;
+    std::wstring g_micGuid;  // the flyout's microphone; empty = none uses the effect pack (defaults shown)
 
-    int Dpi() { return static_cast<int>(GetDpiForWindow(g_flyout)); }
-    int S(int v) { return MulDiv(v, Dpi(), 96); }
-    constexpr int kWidth = 300, kPad = 14, kTitleH = 40, kRowH = 36, kMeterH = 28, kDevNameH = 22, kStatusH = 22, kLinkH = 40;
-    int g_devices = 0;  // devices with live meters (refreshed by the timer)
-    // One block per active microphone: name, two meters, status. With none: a single status line.
-    int DeviceBlockH() { return kDevNameH + 2 * kMeterH + kStatusH; }
-    int HeightDip() { return kTitleH + ROW_COUNT * kRowH + 14 + (g_devices == 0 ? kStatusH + 6 : g_devices * (DeviceBlockH() + 6)) + kLinkH; }
+    std::wstring LoadPreferredMic()
+    {
+        wchar_t v[128] = L"";
+        DWORD size = sizeof(v);
+        if (RegGetValueW(HKEY_CURRENT_USER, kPrefsKey, L"FlyoutMic", RRF_RT_REG_SZ, nullptr, v, &size) != ERROR_SUCCESS) return L"";
+        return v;
+    }
+    void SavePreferredMic(const std::wstring& guid)
+    {
+        HKEY k = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kPrefsKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS)
+        {
+            RegSetValueExW(k, L"FlyoutMic", 0, REG_SZ, reinterpret_cast<const BYTE*>(guid.c_str()),
+                           static_cast<DWORD>((guid.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(k);
+        }
+    }
+
+    int MicIndex(const std::wstring& guid)
+    {
+        for (size_t i = 0; i < g_mics.size(); ++i)
+            if (!guid.empty() && _wcsicmp(g_mics[i].guid.c_str(), guid.c_str()) == 0) return static_cast<int>(i);
+        return -1;
+    }
+
+    // Refreshes the list and keeps the choice: the current one, else the remembered one, else the Windows
+    // default microphone, else one that is recording, else the first.
+    void RefreshMics()
+    {
+        g_mics = app::FindMics();
+        if (MicIndex(g_micGuid) >= 0) return;
+        g_micGuid = LoadPreferredMic();
+        if (MicIndex(g_micGuid) >= 0) return;
+        g_micGuid = app::DefaultMicGuid();
+        if (MicIndex(g_micGuid) >= 0) return;
+        telemetry::Device live[telemetry::kMaxSlots];
+        const int n = telemetry::ReadAll(live);
+        g_micGuid = n > 0 && MicIndex(live[0].device) >= 0 ? live[0].device : !g_mics.empty() ? g_mics[0].guid : L"";
+    }
+
+    const wchar_t* MicName()
+    {
+        const int i = MicIndex(g_micGuid);
+        return i >= 0 ? g_mics[static_cast<size_t>(i)].name.c_str() : L"No microphone uses the engine";
+    }
+    // Where the switches write: this microphone's own settings if it has custom ones, else the defaults.
+    const wchar_t* Scope() { return !g_micGuid.empty() && Settings::IsDeviceCustom(g_micGuid.c_str()) ? g_micGuid.c_str() : nullptr; }
+
+    // ---------------------------------------------------------------- live state (100 ms timer)
+
+    bool g_recording = false;
+    telemetry::Values g_live{};
+    bool g_speech = false;          // with ~300 ms hold, so the dots don't flicker on every syllable
+    ULONGLONG g_speechAt = 0, g_alertUntil = 0;
 
     float Sane(float v, float lo, float hi) { return std::isfinite(v) ? std::clamp(v, lo, hi) : lo; }
 
-    // Which settings the switches show and change: those of the microphone in use when it has custom
-    // settings (the first one, if several are in use), otherwise the defaults. Updated on every paint.
-    std::wstring g_scopeGuid;   // empty = defaults
-    std::wstring g_scopeName;
-    const wchar_t* ScopeGuid() { return g_scopeGuid.empty() ? nullptr : g_scopeGuid.c_str(); }
+    void ReadLive()
+    {
+        telemetry::Device live[telemetry::kMaxSlots];
+        const int n = telemetry::ReadAll(live);
+        g_recording = false;
+        for (int k = 0; k < n; ++k)
+            if (!g_micGuid.empty() && _wcsicmp(live[k].device, g_micGuid.c_str()) == 0)
+            {
+                g_recording = true;
+                g_live = live[k].values;
+            }
+        const ULONGLONG now = GetTickCount64();
+        if (g_recording && Sane(g_live.speech, 0.0f, 1.0f) >= 0.5f) { g_speech = true; g_speechAt = now; }
+        else if (now - g_speechAt > 300) g_speech = false;
+        if (g_recording && Sane(g_live.limiterDb, 0.0f, 99.0f) > 1.0f) g_alertUntil = now + 300;
+    }
+
+    // ---------------------------------------------------------------- layout + drawing
+
+    enum Row { ROW_AEC, ROW_NS, ROW_AGC, ROW_CLEANUP, ROW_COUNT };
+    const wchar_t* kRowNames[ROW_COUNT] = {L"Echo cancellation", L"Noise suppression", L"Automatic gain", L"Cleanup filters"};
+    // Keyboard focus: the microphone field, the four switches, the "More settings" link.
+    enum Focus { F_MIC = -1, F_LINK = ROW_COUNT };
+    int g_focus = F_MIC;
+    bool g_cues = false;
+    int g_hot = -2;  // control under the mouse (-2 none)
+
+    UINT Dpi() { return GetDpiForWindow(g_flyout); }
+    int S(int v) { return ui::Px(v, Dpi()); }
+    constexpr int kWidth = 320, kPad = 14, kTitleH = 40, kMicTop = 40, kMicH = 36, kScopeTop = 80, kCardTop = 106, kRowH = 50, kLinkH = 40;
+    constexpr int kHeight = kCardTop + 8 + ROW_COUNT * kRowH + 8 + kLinkH;
+
+    RECT MicRect() { return {S(kPad), S(kMicTop), S(kWidth - kPad), S(kMicTop + kMicH)}; }
+    RECT RowRect(int row) { return {S(kPad), S(kCardTop + 8 + row * kRowH), S(kWidth - kPad), S(kCardTop + 8 + (row + 1) * kRowH)}; }
+    RECT LinkRect() { return {S(kPad), S(kHeight - kLinkH + 4), S(kPad + 140), S(kHeight - 6)}; }
 
     bool RowOn(const Settings& s, int row)
     {
@@ -133,60 +187,47 @@ namespace
         default: return s.hpfEnabled || s.lpfEnabled;
         }
     }
-    RECT RowRect(int row) { return {S(kPad), S(kTitleH + row * kRowH), S(kWidth - kPad), S(kTitleH + (row + 1) * kRowH)}; }
-    RECT LinkRect() { const int top = HeightDip() - kLinkH; return {S(kPad), S(top + 6), S(kWidth - kPad), S(HeightDip() - 6)}; }
 
-    HFONT Font(int pt, int weight)
+    // The dot and the status line under a row's name.
+    ui::Dot RowState(const Settings& s, int row, std::wstring& detail)
     {
-        LOGFONTW lf{};
-        lf.lfHeight = -MulDiv(pt, Dpi(), 72);
-        lf.lfWeight = weight;
-        lf.lfQuality = CLEARTYPE_QUALITY;
-        wcscpy_s(lf.lfFaceName, L"Segoe UI Variable Text");
-        return CreateFontIndirectW(&lf);
-    }
-
-    void FillRound(HDC dc, RECT r, int radius, COLORREF c)
-    {
-        HBRUSH b = CreateSolidBrush(c);
-        HPEN p = CreatePen(PS_SOLID, 1, c);
-        auto ob = SelectObject(dc, b);
-        auto op = SelectObject(dc, p);
-        RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
-        SelectObject(dc, ob);
-        SelectObject(dc, op);
-        DeleteObject(b);
-        DeleteObject(p);
-    }
-
-    void DrawSwitch(HDC dc, RECT row, bool on, const Theme& t)
-    {
-        const int w = S(40), h = S(20);
-        RECT r{row.right - w, (row.top + row.bottom - h) / 2, row.right, (row.top + row.bottom + h) / 2};
-        FillRound(dc, r, h, on ? t.accent : t.track);
-        const int knob = h - S(8);
-        const int kx = on ? r.right - S(4) - knob : r.left + S(4);
-        RECT k{kx, r.top + S(4), kx + knob, r.top + S(4) + knob};
-        FillRound(dc, k, knob, on ? RGB(255, 255, 255) : t.card);
-    }
-
-    void DrawMeter(HDC dc, int top, const wchar_t* label, float value, float maxValue, const std::wstring& text, const Theme& t,
-                   bool valid)
-    {
-        RECT lab{S(kPad), S(top), S(kPad + 110), S(top + kMeterH)};
-        SetTextColor(dc, t.subtle);
-        DrawTextW(dc, label, -1, &lab, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        RECT bar{S(kPad + 112), S(top + 11), S(kWidth - kPad - 64), S(top + 19)};
-        FillRound(dc, bar, S(8), t.meterBg);
-        if (valid && value > 0)
+        if (!RowOn(s, row)) { detail = L"Off"; return ui::Dot::Off; }
+        if (!g_recording)
         {
-            RECT fill = bar;
-            fill.right = bar.left + static_cast<int>((bar.right - bar.left) * std::clamp(value / maxValue, 0.0f, 1.0f));
-            if (fill.right - fill.left >= S(8)) FillRound(dc, fill, S(8), t.accent);
+            const int i = MicIndex(g_micGuid);
+            detail = i >= 0 && !g_mics[static_cast<size_t>(i)].connected ? L"Microphone not connected" : L"Not recording";
+            return ui::Dot::Idle;
         }
-        RECT val{S(kWidth - kPad - 60), S(top), S(kWidth - kPad), S(top + kMeterH)};
-        SetTextColor(dc, valid ? t.text : t.subtle);
-        DrawTextW(dc, valid ? text.c_str() : L"-", -1, &val, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+        wchar_t buf[64];
+        switch (row)
+        {
+        case ROW_AEC:
+            if (!g_live.aecRunning) { detail = L"No speaker reference for this recording"; return ui::Dot::Hold; }
+            if (!(g_live.referenceDbfs >= -70.0f)) { detail = L"Waiting: nothing playing"; return ui::Dot::Hold; }
+            swprintf_s(buf, L"Removing echo \x00B7 %.0f dB", Sane(g_live.echoRemovedDb, 0.0f, 99.0f));
+            detail = buf;
+            return ui::Dot::Lit;
+        case ROW_NS:
+            if (g_speech) { detail = L"Holding the noise profile (speech)"; return ui::Dot::Hold; }
+            detail = L"Learning the background noise";
+            return ui::Dot::Lit;
+        case ROW_AGC:
+        {
+            const float gain = Sane(g_live.agcGainDb, -99.0f, 99.0f);
+            if (GetTickCount64() < g_alertUntil)
+            {
+                swprintf_s(buf, L"Limiter catching peaks \x00B7 %+.0f dB", gain);
+                detail = buf;
+                return ui::Dot::Alert;
+            }
+            swprintf_s(buf, g_speech ? L"Adjusting \x00B7 %+.0f dB" : L"Holding \x00B7 %+.0f dB", gain);
+            detail = buf;
+            return g_speech ? ui::Dot::Lit : ui::Dot::Hold;
+        }
+        default:
+            detail = s.hpfEnabled && s.lpfEnabled ? L"Rumble and hiss" : s.hpfEnabled ? L"Rumble (below 80 Hz)" : L"Hiss (above 10 kHz)";
+            return ui::Dot::Lit;
+        }
     }
 
     void Paint(HWND hwnd)
@@ -198,104 +239,58 @@ namespace
         HDC dc = CreateCompatibleDC(wdc);
         HBITMAP bmp = CreateCompatibleBitmap(wdc, client.right, client.bottom);
         auto oldBmp = SelectObject(dc, bmp);
-        const Theme t = CurrentTheme();
-        telemetry::Device devs[telemetry::kMaxSlots];
-        const int n = telemetry::ReadAll(devs);
-        g_scopeGuid.clear();
-        g_scopeName.clear();
-        if (n > 0 && Settings::IsDeviceCustom(devs[0].device))
-        {
-            g_scopeGuid = devs[0].device;
-            g_scopeName = devs[0].name;
-        }
-        const Settings s = Settings::ReadFromRegistry(ScopeGuid());
+        const ui::Theme t = ui::CurrentTheme();
+        const UINT dpi = Dpi();
+        // This microphone's effective settings (its own if custom, else the defaults).
+        const Settings s = Settings::ReadFromRegistry(g_micGuid.empty() ? nullptr : g_micGuid.c_str());
 
         HBRUSH bg = CreateSolidBrush(t.bg);
         FillRect(dc, &client, bg);
         DeleteObject(bg);
-        SetBkMode(dc, TRANSPARENT);
-        HFONT title = Font(11, FW_SEMIBOLD), body = Font(10, FW_NORMAL), fontSmall = Font(9, FW_NORMAL);
-
-        // Title
+        HFONT title = ui::Font(11, FW_SEMIBOLD, dpi), body = ui::Font(10, FW_NORMAL, dpi), note = ui::Font(8, FW_NORMAL, dpi),
+              icons = ui::IconFont(10, dpi);
         auto of = SelectObject(dc, title);
-        SetTextColor(dc, t.text);
-        RECT tr{S(kPad), 0, S(kWidth - kPad), S(kTitleH)};
-        DrawTextW(dc, L"WebRTC Audio Engine", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        // Whose settings the switches change (right-aligned, small).
-        {
-            HFONT note = Font(8, FW_NORMAL);
-            SelectObject(dc, note);
-            SetTextColor(dc, t.subtle);
-            RECT nr{S(kPad + 150), 0, S(kWidth - kPad), S(kTitleH)};
-            const std::wstring who = g_scopeGuid.empty() ? std::wstring(L"Default settings") : g_scopeName + L" (custom)";
-            DrawTextW(dc, who.c_str(), -1, &nr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            SelectObject(dc, title);
-            DeleteObject(note);
-        }
+        ui::Text(dc, L"WebRTC Audio Engine", {S(kPad), 0, S(kWidth - kPad), S(kTitleH)}, t.text);
 
-        // Switch rows on a card
-        RECT card{S(kPad / 2), S(kTitleH - 4), S(kWidth - kPad / 2), S(kTitleH + ROW_COUNT * kRowH + 4)};
-        FillRound(dc, card, S(10), t.card);
-        SelectObject(dc, body);
+        // Microphone picker + whose settings the switches change.
+        ui::DrawDropdown(dc, MicRect(), MicName(), !g_mics.empty(), g_hot == F_MIC || ui::ListOpen(), body, icons, t, dpi);
+        SelectObject(dc, note);
+        ui::Text(dc, g_micGuid.empty() ? L"Switches change the default settings"
+                     : Scope()         ? L"Custom settings for this microphone"
+                                       : L"Uses the default settings",
+                 {S(kPad + 2), S(kScopeTop), S(kWidth - kPad), S(kCardTop - 6)}, t.subtle);
+
+        // Switch rows on a card: dot, name, status line, switch.
+        ui::FillRound(dc, {S(kPad / 2), S(kCardTop), S(kWidth - kPad / 2), S(kCardTop + 16 + ROW_COUNT * kRowH)}, S(10), t.card);
         for (int row = 0; row < ROW_COUNT; ++row)
         {
-            RECT r = RowRect(row);
-            RECT text = r;
-            text.left += S(6);
-            SetTextColor(dc, t.text);
-            DrawTextW(dc, kRowNames[row], -1, &text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            r.right -= S(6);
-            DrawSwitch(dc, r, RowOn(s, row), t);
-        }
-
-        // Live meters, one block per microphone that is in use with our effect pack.
-        int y = kTitleH + ROW_COUNT * kRowH + 14;
-        SelectObject(dc, fontSmall);
-        if (n == 0)
-        {
-            RECT status{S(kPad), S(y), S(kWidth - kPad), S(y + kStatusH)};
-            SetTextColor(dc, t.subtle);
-            DrawTextW(dc, L"No app is using a microphone right now.", -1, &status, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        }
-        for (int k = 0; k < n && k < g_devices; ++k)
-        {
-            const telemetry::Values& d = devs[k].values;
-            const bool custom = Settings::IsDeviceCustom(devs[k].device);
-            const Settings ds = Settings::ReadFromRegistry(devs[k].device);  // this microphone's effective settings
-            RECT name{S(kPad), S(y), S(kWidth - kPad), S(y + kDevNameH)};
-            SetTextColor(dc, t.text);
-            std::wstring label = devs[k].name;
-            if (custom) label += L"  (custom)";
-            DrawTextW(dc, label.c_str(), -1, &name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            y += kDevNameH;
-            wchar_t buf[32];
-            // The values come from another process: keep them finite and in a printable range.
-            const float erle = Sane(d.echoRemovedDb, 0.0f, 99.0f), agc = Sane(d.agcGainDb, -99.0f, 99.0f);
-            swprintf_s(buf, L"%.0f dB", erle);
-            DrawMeter(dc, y, L"Echo removed", erle, 40.0f, buf, t, d.aecRunning && ds.aecEnabled);
-            y += kMeterH;
-            swprintf_s(buf, L"%+.0f dB", agc);
-            DrawMeter(dc, y, L"Automatic gain", agc, 30.0f, buf, t, ds.agcEnabled != 0);
-            y += kMeterH;
-            RECT status{S(kPad), S(y), S(kWidth - kPad), S(y + kStatusH)};
-            SetTextColor(dc, t.subtle);
-            const wchar_t* msg = !d.aecRunning             ? L"No echo reference for this recording."
-                                 : !(d.referenceDbfs >= -70.0f) ? L"Echo cancellation ready (nothing playing)."
-                                                            : L"Removing echo from your speakers.";
-            DrawTextW(dc, msg, -1, &status, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            y += kStatusH + 6;
+            const RECT r = RowRect(row);
+            std::wstring detail;
+            const ui::Dot dot = RowState(s, row, detail);
+            ui::DrawDot(dc, {r.left + S(10), (r.top + r.bottom) / 2}, dot, t, dpi);
+            const RECT sw = ui::SwitchRect({r.left, r.top, r.right - S(6), r.bottom}, dpi);
+            SelectObject(dc, body);
+            ui::Text(dc, kRowNames[row], {r.left + S(26), r.top + S(6), sw.left - S(8), (r.top + r.bottom) / 2 + S(2)}, t.text,
+                     DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
+            SelectObject(dc, note);
+            ui::Text(dc, detail, {r.left + S(26), (r.top + r.bottom) / 2 + S(2), sw.left - S(8), r.bottom - S(4)}, t.subtle,
+                     DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+            ui::DrawSwitch(dc, sw, RowOn(s, row), true, t, dpi);
+            if (g_cues && g_focus == row) ui::DrawFocus(dc, sw, (sw.bottom - sw.top) / 2, t, dpi);
         }
 
         // "More settings" link
         SelectObject(dc, body);
         RECT link = LinkRect();
-        SetTextColor(dc, t.accent);
-        DrawTextW(dc, L"More settings\x2026", -1, &link, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        ui::Text(dc, L"More settings\x2026", link, t.accent);
+        if (g_cues && g_focus == F_LINK) ui::DrawFocus(dc, link, S(4), t, dpi);
+        if (g_cues && g_focus == F_MIC && !ui::ListOpen()) ui::DrawFocus(dc, MicRect(), S(6), t, dpi);
 
         SelectObject(dc, of);
         DeleteObject(title);
         DeleteObject(body);
-        DeleteObject(fontSmall);
+        DeleteObject(note);
+        DeleteObject(icons);
         BitBlt(wdc, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, oldBmp);
         DeleteObject(bmp);
@@ -303,9 +298,13 @@ namespace
         EndPaint(hwnd, &ps);
     }
 
+    // ---------------------------------------------------------------- actions
+
+    void HideFlyout();
+
     void Toggle(int row)
     {
-        Settings s = Settings::ReadFromRegistry(ScopeGuid());
+        Settings s = Settings::ReadFromRegistry(Scope());
         switch (row)
         {
         case ROW_AEC: s.aecEnabled = !s.aecEnabled; break;
@@ -318,19 +317,54 @@ namespace
             break;
         }
         }
-        if (Settings::WriteToRegistry(s, ScopeGuid()) != ERROR_SUCCESS)
+        if (Settings::WriteToRegistry(s, Scope()) != ERROR_SUCCESS)
             MessageBeep(MB_ICONWARNING);  // e.g. the settings key is missing or not writable
         InvalidateRect(g_flyout, nullptr, FALSE);
     }
 
+    void PickMic(int i)
+    {
+        if (i < 0 || i >= static_cast<int>(g_mics.size())) return;
+        g_micGuid = g_mics[static_cast<size_t>(i)].guid;
+        SavePreferredMic(g_micGuid);
+        g_speech = false;
+        ReadLive();
+        InvalidateRect(g_flyout, nullptr, FALSE);
+    }
+
+    void OpenMicList()
+    {
+        RefreshMics();
+        if (g_mics.empty()) return;
+        telemetry::Device live[telemetry::kMaxSlots];
+        const int n = telemetry::ReadAll(live);
+        std::vector<ui::ListItem> items;
+        for (const app::Mic& m : g_mics)
+        {
+            bool inUse = false;
+            for (int k = 0; k < n; ++k) inUse |= _wcsicmp(live[k].device, m.guid.c_str()) == 0;
+            items.push_back({m.name, inUse ? L"in use" : !m.connected ? L"not connected" : L"", inUse});
+        }
+        RECT r = MicRect();
+        MapWindowPoints(g_flyout, nullptr, reinterpret_cast<POINT*>(&r), 2);
+        ui::ShowList(g_flyout, r, items, MicIndex(g_micGuid), [](int i) { PickMic(i); });
+    }
+
+    void OpenSettings()
+    {
+        const std::wstring guid = g_micGuid;
+        HideFlyout();
+        app::ShowMainWindow(guid.empty() ? nullptr : guid.c_str());
+    }
+
     void ShowFlyout()
     {
-        {
-            telemetry::Device devs[telemetry::kMaxSlots];
-            g_devices = telemetry::ReadAll(devs);
-        }
+        RefreshMics();
+        ReadLive();
+        g_focus = F_MIC;
+        g_cues = false;
         // Place it above the tray icon (Windows 11 taskbar is usually at the bottom).
-        const int w = S(kWidth), h = S(HeightDip());
+        const int w = S(kWidth), h = S(kHeight);
         NOTIFYICONIDENTIFIER id{sizeof(id), g_flyout, kTrayId};
         RECT icon{};
         POINT anchor{};
@@ -352,6 +386,7 @@ namespace
 
     void HideFlyout()
     {
+        ui::CloseList();
         KillTimer(g_flyout, kMeterTimer);
         ShowWindow(g_flyout, SW_HIDE);
         g_hiddenAt = GetTickCount64();
@@ -370,6 +405,27 @@ namespace
         DestroyMenu(m);
         if (cmd == CMD_OPEN) app::ShowMainWindow();
         else if (cmd == CMD_EXIT) app::ExitApp();
+    }
+
+    // Which control is at p: F_MIC, a row, F_LINK, or -2.
+    int HitTest(POINT p)
+    {
+        RECT mic = MicRect();
+        if (PtInRect(&mic, p)) return F_MIC;
+        for (int row = 0; row < ROW_COUNT; ++row)
+        {
+            RECT r = RowRect(row);
+            if (PtInRect(&r, p)) return row;
+        }
+        RECT link = LinkRect();
+        return PtInRect(&link, p) ? F_LINK : -2;
+    }
+
+    void Activate(int what)
+    {
+        if (what == F_MIC) OpenMicList();
+        else if (what == F_LINK) OpenSettings();
+        else if (what >= 0 && what < ROW_COUNT) Toggle(what);
     }
 
     LRESULT CALLBACK FlyoutProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -401,58 +457,72 @@ namespace
                 HideFlyout();
             return 0;
         case WM_KEYDOWN:
-            if (wp == VK_ESCAPE) HideFlyout();
-            return 0;
-        case WM_TIMER:
-        {
-            // Resize when microphones start or stop being used.
-            telemetry::Device devs[telemetry::kMaxSlots];
-            const int n = telemetry::ReadAll(devs);
-            if (n != g_devices)
+            if (ui::ListOpen()) { ui::ListKey(wp); return 0; }
+            switch (wp)
             {
-                RECT r;
-                GetWindowRect(hwnd, &r);
-                const int oldH = r.bottom - r.top;
-                g_devices = n;
-                const int newH = S(HeightDip());
-                SetWindowPos(hwnd, nullptr, r.left, r.top + (oldH - newH), r.right - r.left, newH, SWP_NOZORDER | SWP_NOACTIVATE);
+            case VK_ESCAPE: HideFlyout(); break;
+            case VK_TAB:
+            {
+                const int dir = GetKeyState(VK_SHIFT) < 0 ? -1 : 1;
+                g_focus = (g_focus + 1 + dir + ROW_COUNT + 2) % (ROW_COUNT + 2) - 1;  // F_MIC .. F_LINK
+                g_cues = true;
+                break;
+            }
+            case VK_SPACE:
+            case VK_RETURN: g_cues = true; Activate(g_focus); break;
+            case VK_UP:
+            case VK_DOWN:
+                g_cues = true;
+                if (g_focus == F_MIC)
+                {
+                    RefreshMics();
+                    PickMic(std::clamp(MicIndex(g_micGuid) + (wp == VK_DOWN ? 1 : -1), 0, static_cast<int>(g_mics.size()) - 1));
+                }
+                break;
             }
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
-        }
-        case WM_LBUTTONUP:
+        case WM_TIMER:
+            ReadLive();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONDOWN:
         {
-            const POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            for (int row = 0; row < ROW_COUNT; ++row)
+            g_cues = false;
+            const int what = HitTest({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+            if (what != -2) { g_focus = what; Activate(what); }
+            return 0;
+        }
+        case WM_MOUSEMOVE:
+        {
+            const int what = HitTest({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+            if (what != g_hot)
             {
-                RECT r = RowRect(row);
-                if (PtInRect(&r, p)) { Toggle(row); return 0; }
-            }
-            RECT link = LinkRect();
-            if (PtInRect(&link, p))
-            {
-                HideFlyout();
-                app::ShowMainWindow();
+                g_hot = what;
+                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
+                TrackMouseEvent(&tme);
+                InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
         }
+        case WM_MOUSELEAVE:
+            g_hot = -2;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
         case WM_SETCURSOR:
-        {
-            POINT p;
-            GetCursorPos(&p);
-            ScreenToClient(hwnd, &p);
-            RECT link = LinkRect();
-            bool hand = PtInRect(&link, p) != FALSE;
-            for (int row = 0; row < ROW_COUNT && !hand; ++row) { RECT r = RowRect(row); hand = PtInRect(&r, p) != FALSE; }
-            SetCursor(LoadCursorW(nullptr, hand ? IDC_HAND : IDC_ARROW));
-            return TRUE;
-        }
+            if (LOWORD(lp) == HTCLIENT)
+            {
+                SetCursor(LoadCursorW(nullptr, g_hot != -2 ? IDC_HAND : IDC_ARROW));
+                return TRUE;
+            }
+            break;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
         case WM_DPICHANGED:
             AddTrayIcon();  // redraw the icon for the new theme / DPI (NIM_ADD on an existing id just fails)
             g_nid.uFlags = NIF_ICON;
             Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+            ui::ApplyWindowTheme(hwnd, ui::CurrentTheme());
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         case WM_PAINT:
@@ -480,10 +550,7 @@ namespace tray
                                    10, 10, nullptr, nullptr, inst, nullptr);
         if (!g_flyout)
             return false;
-        const DWM_WINDOW_CORNER_PREFERENCE round = DWMWCP_ROUND;  // Windows 11 rounded corners + shadow
-        DwmSetWindowAttribute(g_flyout, DWMWA_WINDOW_CORNER_PREFERENCE, &round, sizeof(round));
-        const BOOL dark = IsDark();
-        DwmSetWindowAttribute(g_flyout, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+        ui::ApplyWindowTheme(g_flyout, ui::CurrentTheme());  // Windows 11 rounded corners + shadow, dark frame
         g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
         // When the app runs elevated (e.g. started from an admin shell), Windows blocks messages from the
         // non-elevated taskbar (UIPI): allow the tray callback and Explorer's restart broadcast explicitly.
