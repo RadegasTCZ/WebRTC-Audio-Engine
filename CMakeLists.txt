@@ -67,7 +67,7 @@ target_compile_definitions(WebrtcVoiceApo PRIVATE UNICODE _UNICODE WIN32_LEAN_AN
 target_compile_options(WebrtcVoiceApo PRIVATE /W4 /permissive- /EHsc /guard:cf)
 
 # No embedded manifest: an APO DLL with a manifest fails to load in protected audiodg.
-target_link_options(WebrtcVoiceApo PRIVATE /MANIFEST:NO /guard:cf /DYNAMICBASE /NXCOMPAT)
+target_link_options(WebrtcVoiceApo PRIVATE /MANIFEST:NO /guard:cf /DYNAMICBASE /NXCOMPAT /MAP)  # .map in the build folder: which object each function came from (diagnostics)
 
 target_link_libraries(WebrtcVoiceApo PRIVATE
   audiobaseprocessingobject  # CBaseAudioProcessingObject (Windows SDK)

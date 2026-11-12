@@ -5,6 +5,9 @@
 
 #define FLOATING_POINT
 #define USE_KISS_FFT
+/* SSE/SSE2 kernels of the resampler: every x64 CPU has both, so no runtime check is needed. */
+#define USE_SSE
+#define USE_SSE2
 #define EXPORT
 
 #ifdef constant

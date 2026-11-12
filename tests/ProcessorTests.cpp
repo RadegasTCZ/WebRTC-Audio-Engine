@@ -1,6 +1,7 @@
 // Offline tests for VoiceProcessor (HPF + WebRTC NS chain), no audio engine involved.
 #include "../src/VoiceProcessor.h"
 #include "../src/EchoTimeline.h"
+#include "rtc_base/cpu_info.h"
 #include <string>
 #include <cmath>
 #include <cstdio>
@@ -605,6 +606,8 @@ int main()
 
     std::printf("[17] cost per 10 ms block on this machine (informational; the audio thread has 10 ms)\n");
     {
+        std::printf("    CPU: AVX2 %s (WebRTC picks its AVX2 kernels at runtime; SSE2 otherwise)\n",
+                    webrtc::cpu_info::Supports(webrtc::cpu_info::ISA::kAVX2) ? "detected" : "not detected");
         const int n = 48000 * 20;
         std::mt19937 rng(5);
         std::normal_distribution<float> g(0.0f, 0.05f);

@@ -151,7 +151,9 @@ add_library(webrtc_apm STATIC
     ${STUBS_DIR}/matched_filter_avx2_stub.cc)
 
 target_include_directories(webrtc_apm PUBLIC "${W}" "${ABSEIL_DIR}" "${CHROMIUM_TP}" "${STUBS_DIR}/include")
-target_compile_definitions(webrtc_apm PUBLIC WEBRTC_WIN NOMINMAX RTC_DISABLE_METRICS WEBRTC_APM_DEBUG_DUMP=0
+# WEBRTC_ENABLE_AVX2: lets rtc_base/cpu_info.cc detect AVX2 at runtime, so AEC3 and the AGC2 voice detector use
+# their AVX2 kernels (the *_avx2.cc files below) on CPUs that have it and stay on SSE2 elsewhere.
+target_compile_definitions(webrtc_apm PUBLIC WEBRTC_WIN NOMINMAX RTC_DISABLE_METRICS WEBRTC_APM_DEBUG_DUMP=0 WEBRTC_ENABLE_AVX2
                                        _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
 target_compile_options(webrtc_apm PRIVATE /W0 /EHsc /bigobj /guard:cf)
 set_source_files_properties(${AVX2_SRC} PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
