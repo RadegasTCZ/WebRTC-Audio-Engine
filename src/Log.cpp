@@ -7,6 +7,8 @@ namespace
 {
     SRWLOCK g_lock = SRWLOCK_INIT;
     constexpr wchar_t kLogPath[] = L"C:\\ProgramData\\WebrtcVoiceApo\\probe.log";
+    constexpr wchar_t kOldLogPath[] = L"C:\\ProgramData\\WebrtcVoiceApo\\probe.old.log";
+    constexpr LONGLONG kMaxLogBytes = 2 * 1024 * 1024;  // then rotate: at most ~4 MB on disk
 }
 
 namespace apolog
@@ -41,13 +43,32 @@ namespace apolog
             return;
 
         AcquireSRWLockExclusive(&g_lock);
-        HANDLE h = CreateFileW(kLogPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        // FILE_FLAG_OPEN_REPARSE_POINT: never follow a symlink/junction planted in place of the log.
+        HANDLE h = CreateFileW(kLogPath, FILE_APPEND_DATA | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
         if (h != INVALID_HANDLE_VALUE)
         {
-            DWORD written = 0;
-            WriteFile(h, utf8, static_cast<DWORD>(n - 1), &written, nullptr);
-            CloseHandle(h);
+            FILE_ATTRIBUTE_TAG_INFO tag{};
+            LARGE_INTEGER size{};
+            const bool plainFile = GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+                                   !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
+            if (plainFile && GetFileSizeEx(h, &size) && size.QuadPart > kMaxLogBytes)
+            {
+                // Keep one previous log (probe.old.log) and start over.
+                CloseHandle(h);
+                MoveFileExW(kLogPath, kOldLogPath, MOVEFILE_REPLACE_EXISTING);
+                h = CreateFileW(kLogPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            }
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                if (plainFile)
+                {
+                    DWORD written = 0;
+                    WriteFile(h, utf8, static_cast<DWORD>(n - 1), &written, nullptr);
+                }
+                CloseHandle(h);
+            }
         }
         ReleaseSRWLockExclusive(&g_lock);
     }

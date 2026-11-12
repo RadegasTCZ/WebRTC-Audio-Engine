@@ -114,15 +114,12 @@ void VoiceProcessor::RequestStageParams(const Settings& s)
     const AgcParams want = ParamsFrom(s);
     if (!(want == m_agcRequested))
     {
-        delete m_agcRetired.exchange(nullptr);  // the stage the RT thread swapped out last time
-        auto* fresh = new AgcStage(want, m_agcGainDb.load(std::memory_order_relaxed));  // keep the learnt gain
-        delete m_agcPending.exchange(fresh);    // an older request the RT thread never picked up
+        m_agcHandoff.Offer(new AgcStage(want, m_agcGainDb.load(std::memory_order_relaxed)));  // keep the learnt gain
         m_agcRequested = want;
     }
-    if (m_aec && s.aecStrength != m_aecStrengthRequested)
+    if (m_hasAec.load() && s.aecStrength != m_aecStrengthRequested)
     {
-        delete m_aecRetired.exchange(nullptr);
-        delete m_aecPending.exchange(new AecInstance(s.aecStrength));
+        m_aecHandoff.Offer(new AecInstance(s.aecStrength));
         m_aecStrengthRequested = s.aecStrength;
     }
 }
@@ -233,11 +230,7 @@ VoiceProcessor::VoiceProcessor() = default;
 
 VoiceProcessor::~VoiceProcessor()
 {
-    Unregister();
-    delete m_agcPending.exchange(nullptr);
-    delete m_agcRetired.exchange(nullptr);
-    delete m_aecPending.exchange(nullptr);
-    delete m_aecRetired.exchange(nullptr);
+    Unregister();  // the handoffs free their stages in their own destructors
 }
 
 void VoiceProcessor::Deactivate() noexcept
@@ -291,16 +284,15 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
         d.Init(kAecLatency / 3);
     m_nsDry.Init(kNsLatency);
 
-    delete m_aecPending.exchange(nullptr);
-    delete m_aecRetired.exchange(nullptr);
+    m_aecHandoff.Clear();
     m_aecStrengthRequested = initial.aecStrength;
     m_aec = m_refRing ? std::make_unique<AecInstance>(initial.aecStrength) : nullptr;
+    m_hasAec.store(m_aec != nullptr);
     m_refUnderruns = 0;
 
     if (!m_limiter)
         m_limiter = std::make_unique<OutputLimiter>();
-    delete m_agcPending.exchange(nullptr);
-    delete m_agcRetired.exchange(nullptr);
+    m_agcHandoff.Clear();
     m_agcRequested = ParamsFrom(initial);
     m_agc = std::make_unique<AgcStage>(m_agcRequested);
     m_agcGainDb.store(m_agc->LastGainDb());
@@ -384,18 +376,8 @@ void VoiceProcessor::ProcessBlock() noexcept
 {
     // Pick up stages rebuilt by the settings watcher. The old ones go back through the "retired"
     // slots for freeing on a non-RT thread (the watcher empties those before every rebuild).
-    if (AgcStage* fresh = m_agcPending.exchange(nullptr))
-    {
-        AgcStage* expected = nullptr;
-        m_agcRetired.compare_exchange_strong(expected, m_agc.release());
-        m_agc.reset(fresh);
-    }
-    if (AecInstance* fresh = m_aecPending.exchange(nullptr))
-    {
-        AecInstance* expected = nullptr;
-        m_aecRetired.compare_exchange_strong(expected, m_aec.release());
-        m_aec.reset(fresh);
-    }
+    m_agcHandoff.TakeInto(m_agc);
+    m_aecHandoff.TakeInto(m_aec);
 
     const float invCh = 1.0f / static_cast<float>(m_channels);
     m_mono.fill(0.0f);

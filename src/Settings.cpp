@@ -48,17 +48,19 @@ namespace
     {
         if (!snap.valid.load(std::memory_order_acquire))
             return Settings{};
+        // Bounded: the real-time thread must never spin on a writer that got preempted mid-update. If the
+        // retries run out, the words are a mix of the old and the new snapshot; both were sanitised field
+        // by field, so every value is still in range and the next block reads a clean copy.
         uint32_t words[kWords];
-        for (;;)
+        for (int tries = 0; tries < 64; ++tries)
         {
             const uint32_t s1 = snap.seq.load(std::memory_order_acquire);
-            if (s1 & 1u)
-                continue;  // writer active; it finishes within microseconds
             for (size_t i = 0; i < kWords; ++i)
                 words[i] = snap.words[i].load(std::memory_order_relaxed);
             std::atomic_thread_fence(std::memory_order_acquire);
-            if (snap.seq.load(std::memory_order_relaxed) == s1)
+            if (!(s1 & 1u) && snap.seq.load(std::memory_order_relaxed) == s1)
                 break;
+            YieldProcessor();
         }
         Settings s;
         std::memcpy(&s, words, sizeof(s));
@@ -138,9 +140,11 @@ namespace
 
     void Arm() noexcept
     {
-        // Watch the whole tree: per-device subkeys live under Devices\.
+        // Watch the whole tree: per-device subkeys live under Devices\. THREAD_AGNOSTIC: we arm from
+        // thread-pool threads, which may exit (without it, every thread exit fires a spurious change).
         if (g_key)
-            RegNotifyChangeKeyValue(g_key, TRUE, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME, g_event, TRUE);
+            RegNotifyChangeKeyValue(g_key, TRUE, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_THREAD_AGNOSTIC,
+                                    g_event, TRUE);
     }
 
     void CALLBACK OnChanged(PVOID, BOOLEAN) noexcept

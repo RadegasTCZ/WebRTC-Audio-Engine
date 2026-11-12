@@ -14,6 +14,8 @@
 #include <cmath>
 #include <new>
 
+namespace { void ForgetFxEvents(const void* owner) noexcept; }
+
 std::atomic<long> CProbeApo::s_liveObjects{0};
 std::atomic<long> CProbeApo::s_nextInstance{0};
 
@@ -62,6 +64,7 @@ CProbeApo::CProbeApo(ApoSlot slot, IUnknown* outer) noexcept
 
 CProbeApo::~CProbeApo()
 {
+    ForgetFxEvents(this);
     if (m_device)
         m_device->Release();
     apolog::Write(L"[%s #%ld] destroyed", SlotName(), m_instanceId);
@@ -538,7 +541,15 @@ STDMETHODIMP CProbeApo::AddAuxiliaryInput(DWORD dwInputId, UINT32 cbDataSize, BY
                       m_refFloat ? L"float" : L"non-float", m_refChannels, m_refRate);
         return E_INVALIDARG;
     }
-    m_ref.Init(VoiceProcessor::kSampleRate);  // 1 s of mono reference
+    // 1 s of mono reference. The engine adds/removes the reference while we are unlocked (seen in the
+    // logs), but never reallocate or reset the ring under a running stream: APOProcess may be reading it.
+    if (!m_bIsLocked || m_ref.Capacity() == 0)
+    {
+        if (m_bIsLocked)
+            apolog::Write(L"[%s #%ld] AddAuxiliaryInput while locked: echo cancellation starts with the next stream", SlotName(), m_instanceId);
+        else
+            m_ref.Init(VoiceProcessor::kSampleRate);
+    }
     m_refInputId = dwInputId;
     m_refFrames = m_refCalls = m_refDropped = m_refSilentCalls = 0;
     m_refActive.store(true);
@@ -605,8 +616,23 @@ namespace
     constexpr GUID kEffectAgc = {0x6f64adc0, 0x8211, 0x11e2, {0x8c, 0x70, 0x2c, 0x27, 0xd7, 0xf0, 0x01, 0xfa}};  // AUTOMATIC_GAIN_CONTROL
 
     // Events handed to us by GetControllableSystemEffectsList: signalled when our effect states change.
+    // We keep our OWN duplicate of each event (closed when its effect instance goes away), so we never
+    // signal a handle value the engine has closed and maybe reused for something else.
+    struct FxEvent { const void* owner; HANDLE event; };
     SRWLOCK g_fxEventsLock = SRWLOCK_INIT;
-    std::vector<HANDLE>* g_fxEvents = nullptr;
+    std::vector<FxEvent>* g_fxEvents = nullptr;   // leaked on purpose (process lifetime)
+
+    void ForgetFxEvents(const void* owner) noexcept
+    {
+        AcquireSRWLockExclusive(&g_fxEventsLock);
+        if (g_fxEvents)
+            std::erase_if(*g_fxEvents, [owner](const FxEvent& e) {
+                if (e.owner != owner) return false;
+                CloseHandle(e.event);
+                return true;
+            });
+        ReleaseSRWLockExclusive(&g_fxEventsLock);
+    }
 }
 
 void SignalSystemEffectsChanged() noexcept
@@ -615,7 +641,7 @@ void SignalSystemEffectsChanged() noexcept
     // SetAudioSystemEffectState.
     AcquireSRWLockShared(&g_fxEventsLock);
     if (g_fxEvents)
-        for (HANDLE e : *g_fxEvents) SetEvent(e);
+        for (const FxEvent& e : *g_fxEvents) SetEvent(e.event);
     ReleaseSRWLockShared(&g_fxEventsLock);
 }
 
@@ -637,12 +663,21 @@ STDMETHODIMP CProbeApo::GetControllableSystemEffectsList(AUDIO_SYSTEMEFFECT** ef
     *numEffects = 3;
     if (event)
     {
-        AcquireSRWLockExclusive(&g_fxEventsLock);
-        if (!g_fxEvents) g_fxEvents = new std::vector<HANDLE>();
-        if (std::find(g_fxEvents->begin(), g_fxEvents->end(), event) == g_fxEvents->end())
-            g_fxEvents->push_back(event);
-        ReleaseSRWLockExclusive(&g_fxEventsLock);
-        if (!m_fxEvent) m_fxEvent = event;
+        // One event per instance: a newer call replaces the older event.
+        ForgetFxEvents(this);
+        HANDLE dup = nullptr;
+        if (DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &dup, EVENT_MODIFY_STATE, FALSE, 0))
+        {
+            AcquireSRWLockExclusive(&g_fxEventsLock);
+            if (!g_fxEvents) g_fxEvents = new (std::nothrow) std::vector<FxEvent>();
+            bool kept = false;
+            if (g_fxEvents)
+            {
+                try { g_fxEvents->push_back({this, dup}); kept = true; } catch (...) {}
+            }
+            ReleaseSRWLockExclusive(&g_fxEventsLock);
+            if (!kept) CloseHandle(dup);
+        }
     }
     apolog::Write(L"[%s #%ld] GetControllableSystemEffectsList -> AEC=%u NS=%u AGC=%u (event=%p)", SlotName(), m_instanceId,
                   s.aecEnabled, s.nsEnabled, s.agcEnabled, event);

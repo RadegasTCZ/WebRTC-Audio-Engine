@@ -1,0 +1,30 @@
+# Build output belongs in ..\build (outside the repo); these catch accidental in-tree builds.
+/build/
+/out/
+/package-out/
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Binaries and debug symbols
+*.dll
+*.exe
+*.lib
+*.pdb
+*.obj
+*.ilk
+*.exp
+*.cat
+
+# Logs, backups, certificates (never commit keys)
+*.log
+*.reg
+*.cer
+*.pfx
+*.p12

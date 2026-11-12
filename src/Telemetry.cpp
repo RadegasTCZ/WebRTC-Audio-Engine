@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstring>
 #include <cwchar>
+#include <iterator>
 
 namespace telemetry
 {
@@ -114,6 +115,7 @@ namespace telemetry
                     std::memcpy(d.name, slot.name, sizeof(d.name));
                     std::memcpy(d.device, slot.device, sizeof(d.device));
                     std::memcpy(&d.values, const_cast<const Values*>(&slot.values), sizeof(Values));
+                    d.name[std::size(d.name) - 1] = d.device[std::size(d.device) - 1] = 0;  // never trust the other side to terminate
                     const uint64_t tick = slot.tickMs;
                     std::atomic_thread_fence(std::memory_order_acquire);
                     if (slot.seq != s1)

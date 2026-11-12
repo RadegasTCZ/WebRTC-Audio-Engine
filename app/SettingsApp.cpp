@@ -89,9 +89,10 @@ namespace
                 bool known = false;
                 for (const Mic& m : g_mics) known |= _wcsicmp(m.guid.c_str(), sub) == 0;
                 if (known || !Settings::IsDeviceCustom(sub)) continue;
-                wchar_t name[128] = L"Microphone (not in use)";
+                wchar_t name[128] = L"";
                 DWORD size = sizeof(name);
-                RegGetValueW(devices, sub, L"Name", RRF_RT_REG_SZ, nullptr, name, &size);
+                if (RegGetValueW(devices, sub, L"Name", RRF_RT_REG_SZ, nullptr, name, &size) != ERROR_SUCCESS || !name[0])
+                    wcscpy_s(name, L"Microphone (not in use)");  // missing, too long or not text
                 g_mics.push_back({sub, name});
             }
             RegCloseKey(devices);
@@ -320,10 +321,10 @@ namespace
             else if (id == IDC_CUSTOM && code == BN_CLICKED)
             {
                 const int i = Sel(IDC_DEVICE);
+                if (i <= 0 || i >= static_cast<int>(g_mics.size()))
+                    return 0;
                 const LONG err = Settings::SetDeviceCustom(SelectedGuid(), Checked(IDC_CUSTOM), g_mics[static_cast<size_t>(i)].name.c_str());
-                const int keep = i;
-                PopulateDeviceCombo();
-                SetSel(IDC_DEVICE, keep);
+                PopulateDeviceCombo();  // keeps the same microphone selected (by id), or the defaults if it left the list
                 LoadUi();
                 Status(err == ERROR_SUCCESS ? L"Saved." : L"Could not save (run the install script once as administrator).");
             }
@@ -381,8 +382,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
     g_showMsg = RegisterWindowMessageW(L"WebrtcAudioEngine.ShowSettings");
 
     // Single instance: a second launch asks the running one to show its window.
-    CreateMutexW(nullptr, TRUE, L"WebrtcAudioEngineSettings.SingleInstance");
-    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    // ERROR_ACCESS_DENIED: the running copy is elevated, so its mutex is not ours to open, but it exists.
+    HANDLE instanceMutex = CreateMutexW(nullptr, TRUE, L"WebrtcAudioEngineSettings.SingleInstance");
+    const DWORD mutexErr = GetLastError();
+    if (mutexErr == ERROR_ALREADY_EXISTS || (!instanceMutex && mutexErr == ERROR_ACCESS_DENIED))
     {
         if (!trayOnly)
             if (HWND other = FindWindowW(L"WebrtcAudioEngineSettings", nullptr))
@@ -428,24 +431,33 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
     if (!trayOnly)
         ShowWindow(g_wnd, show);
 
-    // Refresh when the settings change elsewhere (scripts, another tool).
+    // Refresh when the settings change elsewhere (scripts, another tool), including the per-microphone
+    // subkeys. If the key does not exist yet, look again every few seconds.
     HKEY key = nullptr;
     HANDLE changed = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, 0, KEY_NOTIFY | KEY_QUERY_VALUE, &key) == ERROR_SUCCESS)
-        RegNotifyChangeKeyValue(key, FALSE, REG_NOTIFY_CHANGE_LAST_SET, changed, TRUE);
-    else
+    auto watch = [&] {
+        if (!key && RegOpenKeyExW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, 0, KEY_NOTIFY | KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+        {
+            key = nullptr;
+            return false;
+        }
+        RegNotifyChangeKeyValue(key, TRUE, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME, changed, TRUE);
+        return true;
+    };
+    if (!watch())
         Status(L"Not installed: the settings key is missing (run the install script).");
 
     MSG m;
     for (;;)
     {
-        const DWORD r = MsgWaitForMultipleObjects(1, &changed, FALSE, INFINITE, QS_ALLINPUT);
-        if (r == WAIT_OBJECT_0)
+        const DWORD r = MsgWaitForMultipleObjects(1, &changed, FALSE, key ? INFINITE : 5000, QS_ALLINPUT);
+        if (r == WAIT_OBJECT_0 || (r == WAIT_TIMEOUT && watch()))
         {
             if (!(Settings::ReadFromRegistry(Scope()) == g_current))
                 LoadUi();
             tray::SettingsChanged();
-            if (key) RegNotifyChangeKeyValue(key, FALSE, REG_NOTIFY_CHANGE_LAST_SET, changed, TRUE);
+            if (r == WAIT_OBJECT_0) watch();
+            else Status(L"Changes apply immediately.");  // the settings key showed up
             continue;
         }
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE))

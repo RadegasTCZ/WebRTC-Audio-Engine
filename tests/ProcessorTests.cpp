@@ -6,6 +6,9 @@
 #include <functional>
 #include <random>
 #include <vector>
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 static int g_failures = 0;
 #define EXPECT(cond, ...) do { if (!(cond)) { std::printf("  FAIL: " __VA_ARGS__); std::printf("\n"); ++g_failures; } } while (0)
@@ -379,6 +382,167 @@ int main()
         EXPECT(echoOff - echoOn > 20.0, "only %.1f dB echo removal", echoOff - echoOn);
         EXPECT(std::fabs(nearOff - nearOn) < 3.0, "near-end talker changed by %.1f dB", nearOn - nearOff);
         EXPECT(AllFinite(yOn), "non-finite AEC output");
+    }
+
+    std::printf("[13] stuck / bursty / drifting devices: the echo reference stays bounded and AEC recovers\n");
+    {
+        // A timeline in "real" 10 ms ticks. The playback device plays `played` (silence while it is stuck)
+        // and hands it to the echo reference; the capture device records the echo of what was played.
+        // Each scenario decides per tick how many reference samples arrive and whether capture runs.
+        constexpr int kTicks = 1600;          // 16 s
+        constexpr int kEchoDelay = 2400;      // 50 ms speaker -> room -> mic
+        struct Scenario
+        {
+            const char* name;
+            double renderRate;                // reference samples per capture sample (clock drift)
+            std::function<bool(int)> renderStuck, captureStuck;
+            std::function<int(int)> burst;    // extra ticks of reference delivered at once at this tick
+        };
+        auto never = [](int) { return false; };
+        auto between = [](int a, int b) { return [a, b](int t) { return t >= a && t < b; }; };
+        const Scenario scenarios[] = {
+            {"playback stuck 2 s", 1.0, between(600, 800), never, nullptr},
+            {"capture stuck 2 s", 1.0, never, between(600, 800), nullptr},
+            {"both stuck 2 s", 1.0, between(600, 800), between(600, 800), nullptr},
+            {"reference late then 1 s burst", 1.0, between(600, 700), never, [](int t) { return t == 700 ? 100 : 0; }},
+            {"playback clock +0.1 %", 1.001, never, never, nullptr},
+            {"playback clock +100 ppm", 1.0001, never, never, nullptr},
+            {"playback clock +20 ppm", 1.00002, never, never, nullptr},
+            {"playback clock -100 ppm", 0.9999, never, never, nullptr},
+            {"playback clock -0.1 %", 0.999, never, never, nullptr},
+        };
+        Settings st = def; st.nsEnabled = 0; st.hpfEnabled = 0; st.lpfEnabled = 0; st.limiterEnabled = 0;
+        for (const Scenario& sc : scenarios)
+        {
+            // Far-end source (speech-like bursts), indexed in playback samples.
+            const int srcLen = static_cast<int>(kTicks * 480 * 1.01) + 48000 * 2;
+            std::mt19937 rng(5);
+            std::normal_distribution<float> g(0.0f, 0.1f);
+            std::vector<float> src(static_cast<size_t>(srcLen));
+            for (int i = 0; i < srcLen; ++i) src[i] = ((i / 24000) % 5 < 3) ? g(rng) : 0.0f;
+
+            double results[2] = {};
+            size_t maxAvail = 0;
+            uint64_t underruns = 0;
+            double worstMs = 0;
+            bool finite = true;
+            for (int aecOn = 0; aecOn < 2; ++aecOn)
+            {
+                Settings s = st; s.aecEnabled = static_cast<uint32_t>(aecOn);
+                ReferenceRing ring;
+                ring.Init(48000);
+                VoiceProcessor vp;
+                vp.SetReference(&ring);
+                vp.Prepare(kCh, 48000, s);
+                // played[t] for every capture-clock sample (what the speaker emits at that instant).
+                std::vector<float> played(static_cast<size_t>(kTicks) * 480, 0.0f);
+                std::vector<float> pending;      // reference held back by a stuck-then-bursting device
+                double renderPos = 0;            // playback samples consumed so far
+                std::vector<float> y(static_cast<size_t>(kTicks) * 480 * kCh, 0.0f), mic(480 * kCh);
+                float lp = 0;
+                LARGE_INTEGER freq, t0, t1;
+                QueryPerformanceFrequency(&freq);
+                for (int t = 0; t < kTicks; ++t)
+                {
+                    // Playback side for this tick.
+                    const bool rStuck = sc.renderStuck(t);
+                    const double next = renderPos + 480 * sc.renderRate;
+                    const int a = static_cast<int>(renderPos), b = static_cast<int>(next);
+                    if (!rStuck)
+                    {
+                        for (int i = 0; i < 480; ++i)
+                            played[static_cast<size_t>(t) * 480 + i] = src[static_cast<size_t>(a + static_cast<int>(i * sc.renderRate))];
+                        ring.Write(src.data() + a, static_cast<size_t>(b - a));
+                        renderPos = next;
+                    }
+                    else if (sc.burst)  // the device kept playing, but its reference is delivered late
+                    {
+                        for (int i = 0; i < 480; ++i)
+                            played[static_cast<size_t>(t) * 480 + i] = src[static_cast<size_t>(a + i)];
+                        pending.insert(pending.end(), src.begin() + a, src.begin() + b);
+                        renderPos = next;
+                    }
+                    if (sc.burst && sc.burst(t) > 0)
+                    {
+                        ring.Write(pending.data(), pending.size());
+                        pending.clear();
+                    }
+                    maxAvail = std::max(maxAvail, ring.Available());
+
+                    // Capture side: the mic hears the echo of what was played 50 ms earlier.
+                    for (int i = 0; i < 480; ++i)
+                    {
+                        const long long idx = static_cast<long long>(t) * 480 + i - kEchoDelay;
+                        lp += 0.3f * ((idx >= 0 ? played[static_cast<size_t>(idx)] : 0.0f) - lp);
+                        for (int c = 0; c < kCh; ++c) mic[static_cast<size_t>(i) * kCh + c] = 0.5f * lp;
+                    }
+                    if (sc.captureStuck(t))
+                        continue;  // those mic samples are lost; the playback side kept running
+                    QueryPerformanceCounter(&t0);
+                    vp.Process(mic.data(), y.data() + static_cast<size_t>(t) * 480 * kCh, 480, s);
+                    QueryPerformanceCounter(&t1);
+                    worstMs = std::max(worstMs, 1000.0 * (t1.QuadPart - t0.QuadPart) / freq.QuadPart);
+                }
+                finite = finite && AllFinite(y);
+                // Echo left 3..7 s after the event (11..15 s); the drift cases measure the same window.
+                results[aecOn] = RmsDb(y, static_cast<size_t>(1100) * 480 * kCh, static_cast<size_t>(1500) * 480 * kCh);
+                if (aecOn) underruns = vp.ReferenceUnderruns();
+            }
+            const double removed = results[0] - results[1];
+            std::printf("    %-30s echo removed %5.1f dB after recovery, reference queue max %5zu (cap 48000), ref underruns %4llu, worst call %.2f ms\n",
+                        sc.name, removed, maxAvail, static_cast<unsigned long long>(underruns), worstMs);
+            EXPECT(finite, "%s: non-finite output", sc.name);
+            EXPECT(maxAvail <= 48000, "%s: reference queue exceeded its capacity", sc.name);
+            EXPECT(std::fabs(sc.renderRate - 1.0) > 0.0005 || removed > 15.0, "%s: only %.1f dB echo removal after recovery", sc.name, removed);
+        }
+    }
+
+    std::printf("[14] settings hammered from another thread while processing (stage swaps, seqlock reads)\n");
+    {
+        Settings base = def; base.agcEnabled = 1;
+        settings::Publish(base);
+        ReferenceRing ring;
+        ring.Init(48000);
+        VoiceProcessor vp;
+        vp.SetReference(&ring);
+        vp.Prepare(kCh, 48000, base);
+        std::atomic<bool> stop{false};
+        std::atomic<int> changes{0};
+        std::thread watcher([&] {
+            Settings s = base;
+            for (int i = 0; !stop.load(); ++i)
+            {
+                s.agcMaxGainDb = 20 + (i % 30);              // AGC2 rebuild
+                s.aecStrength = static_cast<uint32_t>(i % 3); // AEC3 rebuild
+                s.nsLevel = static_cast<uint32_t>(i % 4);
+                settings::Publish(s);
+                VoiceProcessor::OnSettingsChanged(s);
+                ++changes;
+                std::this_thread::sleep_for(std::chrono::microseconds(500 + (i % 7) * 300));
+            }
+        });
+        auto noise = Noise(48000 * 4, -30.0f, 3);
+        std::vector<float> y(noise.size()), refBlock(480, 0.01f);
+        double worstMs = 0;
+        LARGE_INTEGER freq, t0, t1;
+        QueryPerformanceFrequency(&freq);
+        // Keep processing (looping the noise) until the watcher has made plenty of changes.
+        for (int pos = 0, blocks = 0; changes.load() < 300 && blocks < 200000; pos = (pos + 480) % (48000 * 4), ++blocks)
+        {
+            ring.Write(refBlock.data(), 480);
+            const Settings cur = settings::Current();
+            QueryPerformanceCounter(&t0);
+            vp.Process(noise.data() + static_cast<size_t>(pos) * kCh, y.data() + static_cast<size_t>(pos) * kCh, 480, cur);
+            QueryPerformanceCounter(&t1);
+            worstMs = std::max(worstMs, 1000.0 * (t1.QuadPart - t0.QuadPart) / freq.QuadPart);
+        }
+        stop = true;
+        watcher.join();
+        std::printf("    %d settings changes while processing, output finite: %s, worst call %.2f ms\n", changes.load(),
+                    AllFinite(y) ? "yes" : "NO", worstMs);
+        EXPECT(changes.load() >= 300, "watcher only made %d changes", changes.load());
+        EXPECT(AllFinite(y), "non-finite output under concurrent settings changes");
+        settings::Publish(Settings{});
     }
 
     std::printf(g_failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", g_failures);

@@ -7,7 +7,6 @@
 #include <shellapi.h>
 #include <windowsx.h>
 #include <algorithm>
-#include <cstdarg>
 #include <cwchar>
 #include <cmath>
 #include <string>
@@ -23,31 +22,6 @@ namespace
 
     HINSTANCE g_inst = nullptr;
 
-    // Small diagnostic log: %LOCALAPPDATA%\WebrtcAudioEngine\tray.log (tray events only).
-    void TrayLog(const wchar_t* fmt, ...)
-    {
-        wchar_t path[MAX_PATH];
-        if (!GetEnvironmentVariableW(L"LOCALAPPDATA", path, MAX_PATH)) return;
-        wcscat_s(path, L"\\WebrtcAudioEngine");
-        CreateDirectoryW(path, nullptr);
-        wcscat_s(path, L"\\tray.log");
-        wchar_t msg[256];
-        va_list a;
-        va_start(a, fmt);
-        vswprintf_s(msg, fmt, a);
-        va_end(a);
-        SYSTEMTIME t;
-        GetLocalTime(&t);
-        wchar_t line[320];
-        swprintf_s(line, L"%02u:%02u:%02u.%03u %s\r\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, msg);
-        HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, 0, nullptr);
-        if (h == INVALID_HANDLE_VALUE) return;
-        char u8[640];
-        const int n = WideCharToMultiByte(CP_UTF8, 0, line, -1, u8, sizeof(u8), nullptr, nullptr);
-        DWORD w;
-        if (n > 1) WriteFile(h, u8, n - 1, &w, nullptr);
-        CloseHandle(h);
-    }
     HWND g_flyout = nullptr;
     HICON g_icon = nullptr;
     NOTIFYICONDATAW g_nid{};
@@ -96,6 +70,11 @@ namespace
         HDC dc = GetDC(nullptr);
         HBITMAP color = CreateDIBSection(dc, reinterpret_cast<BITMAPINFO*>(&bi), DIB_RGB_COLORS, &bits, nullptr, 0);
         ReleaseDC(nullptr, dc);
+        if (!color || !bits)
+        {
+            if (color) DeleteObject(color);
+            return nullptr;  // no icon this time (out of GDI resources); the tray keeps working
+        }
         auto* px = static_cast<uint32_t*>(bits);
         std::fill(px, px + size * size, 0u);
         const uint32_t ink = IsDark() ? 0xFFFFFFFF : 0xFF202020;
@@ -161,6 +140,14 @@ namespace
     // One block per active microphone: name, two meters, status. With none: a single status line.
     int DeviceBlockH() { return kDevNameH + 2 * kMeterH + kStatusH; }
     int HeightDip() { return kTitleH + ROW_COUNT * kRowH + 14 + (g_devices == 0 ? kStatusH + 6 : g_devices * (DeviceBlockH() + 6)) + kLinkH; }
+
+    float Sane(float v, float lo, float hi) { return std::isfinite(v) ? std::clamp(v, lo, hi) : lo; }
+
+    // Which settings the switches show and change: those of the microphone in use when it has custom
+    // settings (the first one, if several are in use), otherwise the defaults. Updated on every paint.
+    std::wstring g_scopeGuid;   // empty = defaults
+    std::wstring g_scopeName;
+    const wchar_t* ScopeGuid() { return g_scopeGuid.empty() ? nullptr : g_scopeGuid.c_str(); }
 
     bool RowOn(const Settings& s, int row)
     {
@@ -238,7 +225,16 @@ namespace
         HBITMAP bmp = CreateCompatibleBitmap(wdc, client.right, client.bottom);
         auto oldBmp = SelectObject(dc, bmp);
         const Theme t = CurrentTheme();
-        const Settings s = Settings::ReadFromRegistry();
+        telemetry::Device devs[telemetry::kMaxSlots];
+        const int n = telemetry::ReadAll(devs);
+        g_scopeGuid.clear();
+        g_scopeName.clear();
+        if (n > 0 && Settings::IsDeviceCustom(devs[0].device))
+        {
+            g_scopeGuid = devs[0].device;
+            g_scopeName = devs[0].name;
+        }
+        const Settings s = Settings::ReadFromRegistry(ScopeGuid());
 
         HBRUSH bg = CreateSolidBrush(t.bg);
         FillRect(dc, &client, bg);
@@ -251,6 +247,17 @@ namespace
         SetTextColor(dc, t.text);
         RECT tr{S(kPad), 0, S(kWidth - kPad), S(kTitleH)};
         DrawTextW(dc, L"WebRTC Audio Engine", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        // Whose settings the switches change (right-aligned, small).
+        {
+            HFONT note = Font(8, FW_NORMAL);
+            SelectObject(dc, note);
+            SetTextColor(dc, t.subtle);
+            RECT nr{S(kPad + 150), 0, S(kWidth - kPad), S(kTitleH)};
+            const std::wstring who = g_scopeGuid.empty() ? std::wstring(L"Default settings") : g_scopeName + L" (custom)";
+            DrawTextW(dc, who.c_str(), -1, &nr, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            SelectObject(dc, title);
+            DeleteObject(note);
+        }
 
         // Switch rows on a card
         RECT card{S(kPad / 2), S(kTitleH - 4), S(kWidth - kPad / 2), S(kTitleH + ROW_COUNT * kRowH + 4)};
@@ -268,8 +275,6 @@ namespace
         }
 
         // Live meters, one block per microphone that is in use with our effect pack.
-        telemetry::Device devs[telemetry::kMaxSlots];
-        const int n = telemetry::ReadAll(devs);
         int y = kTitleH + ROW_COUNT * kRowH + 14;
         SelectObject(dc, fontSmall);
         if (n == 0)
@@ -290,16 +295,18 @@ namespace
             DrawTextW(dc, label.c_str(), -1, &name, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             y += kDevNameH;
             wchar_t buf[32];
-            swprintf_s(buf, L"%.0f dB", std::max(0.0f, d.echoRemovedDb));
-            DrawMeter(dc, y, L"Echo removed", d.echoRemovedDb, 40.0f, buf, t, d.aecRunning && ds.aecEnabled);
+            // The values come from another process: keep them finite and in a printable range.
+            const float erle = Sane(d.echoRemovedDb, 0.0f, 99.0f), agc = Sane(d.agcGainDb, -99.0f, 99.0f);
+            swprintf_s(buf, L"%.0f dB", erle);
+            DrawMeter(dc, y, L"Echo removed", erle, 40.0f, buf, t, d.aecRunning && ds.aecEnabled);
             y += kMeterH;
-            swprintf_s(buf, L"%+.0f dB", d.agcGainDb);
-            DrawMeter(dc, y, L"Automatic gain", d.agcGainDb, 30.0f, buf, t, ds.agcEnabled != 0);
+            swprintf_s(buf, L"%+.0f dB", agc);
+            DrawMeter(dc, y, L"Automatic gain", agc, 30.0f, buf, t, ds.agcEnabled != 0);
             y += kMeterH;
             RECT status{S(kPad), S(y), S(kWidth - kPad), S(y + kStatusH)};
             SetTextColor(dc, t.subtle);
             const wchar_t* msg = !d.aecRunning             ? L"No echo reference for this recording."
-                                 : d.referenceDbfs < -70.0f ? L"Echo cancellation ready (nothing playing)."
+                                 : !(d.referenceDbfs >= -70.0f) ? L"Echo cancellation ready (nothing playing)."
                                                             : L"Removing echo from your speakers.";
             DrawTextW(dc, msg, -1, &status, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             y += kStatusH + 6;
@@ -324,7 +331,7 @@ namespace
 
     void Toggle(int row)
     {
-        Settings s = Settings::ReadFromRegistry();
+        Settings s = Settings::ReadFromRegistry(ScopeGuid());
         switch (row)
         {
         case ROW_AEC: s.aecEnabled = !s.aecEnabled; break;
@@ -337,7 +344,8 @@ namespace
             break;
         }
         }
-        Settings::WriteToRegistry(s);
+        if (Settings::WriteToRegistry(s, ScopeGuid()) != ERROR_SUCCESS)
+            MessageBeep(MB_ICONWARNING);  // e.g. the settings key is missing or not writable
         InvalidateRect(g_flyout, nullptr, FALSE);
     }
 
@@ -363,8 +371,7 @@ namespace
         int x = std::clamp(static_cast<int>(anchor.x - w / 2), static_cast<int>(wa.left + S(12)), static_cast<int>(wa.right - w - S(12)));
         int y = anchor.y < (wa.top + wa.bottom) / 2 ? wa.top + S(12) : wa.bottom - h - S(12);
         SetWindowPos(g_flyout, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
-        const BOOL fg = SetForegroundWindow(g_flyout);
-        TrayLog(L"ShowFlyout at %d,%d size %dx%d foreground=%d", x, y, w, h, fg);
+        SetForegroundWindow(g_flyout);
         SetTimer(g_flyout, kMeterTimer, 100, nullptr);
         InvalidateRect(g_flyout, nullptr, FALSE);
     }
@@ -401,7 +408,6 @@ namespace
         switch (msg)
         {
         case WM_TRAY:
-            TrayLog(L"WM_TRAY event=0x%04X visible=%d", LOWORD(lp), IsWindowVisible(hwnd) ? 1 : 0);
             // NOTIFYICON_VERSION_4: a left click arrives as NIN_SELECT (after WM_LBUTTONDOWN/UP, which we
             // ignore: handling both would open and immediately close the flyout). Keyboard: NIN_KEYSELECT.
             switch (LOWORD(lp))
@@ -418,10 +424,7 @@ namespace
             return 0;
         case WM_ACTIVATE:
             if (LOWORD(wp) == WA_INACTIVE && IsWindowVisible(hwnd))
-            {
-                TrayLog(L"flyout deactivated -> hide");
                 HideFlyout();
-            }
             return 0;
         case WM_KEYDOWN:
             if (wp == VK_ESCAPE) HideFlyout();
@@ -514,7 +517,6 @@ namespace tray
         ChangeWindowMessageFilterEx(g_flyout, g_taskbarCreated, MSGFLT_ALLOW, nullptr);
         ChangeWindowMessageFilterEx(g_flyout, WM_COMMAND, MSGFLT_ALLOW, nullptr);
         AddTrayIcon();
-        TrayLog(L"tray started (icon added)");
         return true;
     }
 
@@ -523,6 +525,8 @@ namespace tray
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         if (g_icon) DestroyIcon(g_icon);
         if (g_flyout) DestroyWindow(g_flyout);
+        g_icon = nullptr;
+        g_flyout = nullptr;
     }
 
     void SettingsChanged()

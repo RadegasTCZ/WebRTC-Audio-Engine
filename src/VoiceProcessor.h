@@ -63,7 +63,7 @@ public:
     int SampleRate() const noexcept { return m_rate; }
     uint64_t Underruns() const noexcept { return m_underruns; }
     uint64_t ReferenceUnderruns() const noexcept { return m_refUnderruns; }
-    bool HasAec() const noexcept { return m_aec != nullptr; }
+    bool HasAec() const noexcept { return m_hasAec.load(std::memory_order_relaxed); }
     float AgcGainDb() const noexcept { return m_agcGainDb.load(std::memory_order_relaxed); }
     float LimiterReductionDb() const noexcept { return m_limiterDb.load(std::memory_order_relaxed); }
 
@@ -117,6 +117,38 @@ private:
         void Clear() noexcept { std::fill(buf.begin(), buf.end(), 0.0f); pos = 0; }
         void Run(const float* in, float* out, int n) noexcept;
     };
+    // Hands a stage rebuilt on the settings watcher thread (it allocates) to the real-time thread, and the
+    // replaced stage back for freeing. Only the watcher frees; only the RT thread fills `retired`. Two retired
+    // slots suffice: every Offer empties both before publishing a new stage, and at most two swaps can
+    // happen between two Offers (one of the previous request, one of the new).
+    template <class T>
+    struct Handoff
+    {
+        std::atomic<T*> pending{nullptr};
+        std::array<std::atomic<T*>, 2> retired{};
+        ~Handoff() { Clear(); }
+        void Clear() noexcept   // non-RT
+        {
+            delete pending.exchange(nullptr);
+            for (auto& r : retired) delete r.exchange(nullptr);
+        }
+        void Offer(T* fresh) noexcept   // non-RT (watcher)
+        {
+            for (auto& r : retired) delete r.exchange(nullptr);
+            delete pending.exchange(fresh);   // a request the RT thread never picked up
+        }
+        void TakeInto(std::unique_ptr<T>& current) noexcept   // RT: swap in a pending stage, if any
+        {
+            std::atomic<T*>* slot = nullptr;
+            for (auto& r : retired)
+                if (!r.load(std::memory_order_acquire)) { slot = &r; break; }
+            if (!slot) return;   // no room to hand the old one back yet: keep it for one more block
+            T* fresh = pending.exchange(nullptr);
+            if (!fresh) return;
+            slot->store(current.release(), std::memory_order_release);
+            current.reset(fresh);
+        }
+    };
     struct Channel
     {
         VarDelay dry;
@@ -146,13 +178,14 @@ private:
     std::array<float, kBlock> m_mono{}, m_s1{}, m_ref{}, m_postAec{}, m_d1{}, m_nsOut{}, m_nsAlt{}, m_voice{}, m_tmp{};
 
     std::unique_ptr<AecInstance> m_aec;           // null when the stream has no echo reference
-    std::atomic<AecInstance*> m_aecPending{nullptr}, m_aecRetired{nullptr};
+    Handoff<AecInstance> m_aecHandoff;
+    std::atomic<bool> m_hasAec{false};            // m_aec != nullptr, readable from the watcher thread
     uint32_t m_aecStrengthRequested = 1;
     ReferenceRing* m_refRing = nullptr;
     uint64_t m_refUnderruns = 0;
 
     std::unique_ptr<AgcStage> m_agc;
-    std::atomic<AgcStage*> m_agcPending{nullptr}, m_agcRetired{nullptr};
+    Handoff<AgcStage> m_agcHandoff;
     AgcParams m_agcRequested{};
     std::unique_ptr<OutputLimiter> m_limiter;
 

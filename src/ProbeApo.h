@@ -122,7 +122,6 @@ private:
     bool m_refFloat = false;
     std::atomic<uint64_t> m_refFrames{0}, m_refCalls{0}, m_refDropped{0}, m_refSilentCalls{0};
 
-    HANDLE m_fxEvent = nullptr;   // from GetControllableSystemEffectsList (owned by the engine)
     ::telemetry::Slot* m_telemetry = nullptr;  // this device's shared-memory meters for the tray app
     wchar_t m_endpointName[64] = L"Microphone";
     wchar_t m_endpointKey[128] = L"";
