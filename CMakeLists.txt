@@ -46,11 +46,11 @@ add_custom_command(OUTPUT ${APP_ICON_DIR}/WebrtcAudioEngine.ico
     COMMAND MakeIcon ${APP_ICON_DIR}/WebrtcAudioEngine.ico
     DEPENDS MakeIcon app/Glyph.h
     COMMENT "Generating the app icon")
-add_executable(WebrtcAudioEngineSettings WIN32 app/SettingsApp.cpp app/TrayFlyout.cpp app/App.h app/Glyph.h
+add_executable(WebrtcAudioEngineSettings WIN32 app/SettingsApp.cpp app/TrayFlyout.cpp app/Ui.cpp app/Ui.h app/App.h app/Glyph.h
     app/SettingsApp.manifest app/SettingsApp.rc ${APP_ICON_DIR}/WebrtcAudioEngine.ico)
 target_include_directories(WebrtcAudioEngineSettings PRIVATE ${APP_ICON_DIR})
 set_source_files_properties(app/SettingsApp.rc PROPERTIES OBJECT_DEPENDS ${APP_ICON_DIR}/WebrtcAudioEngine.ico)
-target_link_libraries(WebrtcAudioEngineSettings PRIVATE settings_core comctl32 shell32 user32 gdi32 dwmapi)
+target_link_libraries(WebrtcAudioEngineSettings PRIVATE settings_core comctl32 shell32 user32 gdi32 dwmapi msimg32)
 target_compile_options(WebrtcAudioEngineSettings PRIVATE /W4 /permissive- /guard:cf)
 target_link_options(WebrtcAudioEngineSettings PRIVATE /guard:cf)
 

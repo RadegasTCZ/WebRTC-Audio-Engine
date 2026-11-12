@@ -13,7 +13,8 @@ Test-signed, for test machines only.
 
 ## Layout
 - `src/` the effect (APO DLL loaded by audiodg) and the processing core
-- `app/` "WebRTC Audio Engine Settings": settings window + tray flyout with live meters
+- `app/` "WebRTC Audio Engine Settings": settings window + tray flyout (microphone picker, activity dots), sharing one drawing kit (`Ui.*`)
+- `tools/` build-time helpers (`MakeIcon`: generates the app icon from `app/Glyph.h`)
 - `package/` driver packages (component + extension INF) that register the effect pack
 - `scripts/` build, install and settings scripts
 - `tests/` offline tests (`ProcessorTests`, `ApoHarness`), `CaptureTest` (live mic check) and `PathProbe` (speaker path vs echo reference)
