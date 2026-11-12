@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Tray icon + a home-brew flyout: pick a microphone, then quick switches for echo cancellation, noise
-// suppression, automatic gain and cleanup, each with an activity dot and a one-line status from the
-// audio effect's live telemetry. Drawn with the shared kit (Ui.h); follows the light/dark theme.
+// suppression, automatic gain and cleanup, each with an activity dot; pointing at a row's dot or name
+// (or tabbing to it) shows a small bubble with its live status from the audio effect's telemetry. Drawn with the shared kit (Ui.h); follows the light/dark theme.
 //
 // Dots: lit = working, amber = holding/waiting, filled grey = switched off, hollow ring = this
 // microphone is not recording, red = the limiter is catching peaks (on the automatic gain row).
@@ -21,7 +21,8 @@ namespace
 {
     constexpr UINT WM_TRAY = WM_APP + 1;
     constexpr UINT kTrayId = 1;
-    constexpr UINT_PTR kMeterTimer = 1;
+    constexpr UINT_PTR kMeterTimer = 1, kTipTimer = 2;
+    constexpr UINT kTipDelayMs = 400;
     enum MenuCmd : UINT { CMD_OPEN = 1, CMD_EXIT };
     constexpr wchar_t kPrefsKey[] = L"Software\\WebrtcAudioEngine";  // per user: the flyout's microphone
 
@@ -172,10 +173,14 @@ namespace
     int g_focus = F_MIC;
     bool g_cues = false;
     int g_hot = -2;  // control under the mouse (-2 none)
+    int g_tipAim = -1, g_tipRow = -1;  // row whose dot/name the mouse rests on; row whose bubble is shown
+
+    // The bubble shows for the row the mouse rested on, else for the row focused from the keyboard.
+    int TipRow() { return g_tipRow >= 0 ? g_tipRow : g_cues && g_focus >= 0 && g_focus < ROW_COUNT ? g_focus : -1; }
 
     UINT Dpi() { return GetDpiForWindow(g_flyout); }
     int S(int v) { return ui::Px(v, Dpi()); }
-    constexpr int kWidth = 320, kPad = 14, kTitleH = 40, kMicTop = 40, kMicH = 36, kScopeTop = 80, kCardTop = 106, kRowH = 50, kLinkH = 40;
+    constexpr int kWidth = 320, kPad = 14, kTitleH = 40, kMicTop = 40, kMicH = 36, kScopeTop = 80, kCardTop = 106, kRowH = 40, kLinkH = 40;
     constexpr int kHeight = kCardTop + 8 + ROW_COUNT * kRowH + 8 + kLinkH;
 
     RECT MicRect() { return {S(kPad), S(kMicTop), S(kWidth - kPad), S(kMicTop + kMicH)}; }
@@ -249,19 +254,28 @@ namespace
         g_fonts = {dpi, ui::Font(11, FW_SEMIBOLD, dpi), ui::Font(10, FW_NORMAL, dpi), ui::Font(8, FW_NORMAL, dpi), ui::IconFont(10, dpi)};
     }
 
-    // What the dots and status lines show right now; the timer repaints only when this changes.
+    // What the dots and the open bubble show right now; the timer repaints only when this changes.
     std::wstring g_shown;
     std::wstring LiveView()
     {
         std::wstring v;
+        const int tip = TipRow();
         for (int row = 0; row < ROW_COUNT; ++row)
         {
             std::wstring detail;
             v += static_cast<wchar_t>(L'0' + static_cast<int>(RowState(g_settings, row, detail)));
-            v += detail;
+            if (row == tip) v += detail;
             v += L'|';
         }
         return v;
+    }
+
+    // The part of a row that shows the bubble: the dot and the name (not the switch).
+    RECT TipZone(int row)
+    {
+        const RECT r = RowRect(row);
+        const RECT sw = ui::SwitchRect({r.left, r.top, r.right - S(6), r.bottom}, Dpi());
+        return {r.left, r.top, sw.left - S(8), r.bottom};
     }
 
     void Paint(HWND hwnd)
@@ -303,11 +317,7 @@ namespace
             ui::DrawDot(dc, {r.left + S(10), (r.top + r.bottom) / 2}, dot, t, dpi);
             const RECT sw = ui::SwitchRect({r.left, r.top, r.right - S(6), r.bottom}, dpi);
             SelectObject(dc, body);
-            ui::Text(dc, kRowNames[row], {r.left + S(26), r.top + S(6), sw.left - S(8), (r.top + r.bottom) / 2 + S(2)}, t.text,
-                     DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
-            SelectObject(dc, note);
-            ui::Text(dc, detail, {r.left + S(26), (r.top + r.bottom) / 2 + S(2), sw.left - S(8), r.bottom - S(4)}, t.subtle,
-                     DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+            ui::Text(dc, kRowNames[row], {r.left + S(26), r.top, sw.left - S(8), r.bottom}, t.text);
             ui::DrawSwitch(dc, sw, RowOn(s, row), true, t, dpi);
             if (g_cues && g_focus == row) ui::DrawFocus(dc, sw, (sw.bottom - sw.top) / 2, t, dpi);
         }
@@ -318,6 +328,22 @@ namespace
         ui::Text(dc, L"More settings\x2026", link, t.accent);
         if (g_cues && g_focus == F_LINK) ui::DrawFocus(dc, link, S(4), t, dpi);
         if (g_cues && g_focus == F_MIC && !ui::ListOpen()) ui::DrawFocus(dc, MicRect(), S(6), t, dpi);
+
+        // Status bubble, just below the row, on top of everything else.
+        if (const int tip = TipRow(); tip >= 0)
+        {
+            std::wstring detail;
+            RowState(s, tip, detail);
+            SelectObject(dc, note);
+            RECT m{0, 0, 0, 0};
+            DrawTextW(dc, detail.c_str(), -1, &m, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+            const RECT r = RowRect(tip);
+            RECT b{r.left + S(18), r.bottom - S(6), 0, r.bottom - S(6) + S(24)};
+            b.right = std::min<LONG>(b.left + m.right + S(20), client.right - S(6));
+            ui::FillRound(dc, b, S(6), t.control);
+            ui::FillRound(dc, b, S(6), t.line, 1.0f);
+            ui::Text(dc, detail, {b.left + S(10), b.top, b.right - S(8), b.bottom}, t.text);
+        }
 
         SelectObject(dc, of);
         BitBlt(wdc, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
@@ -420,6 +446,8 @@ namespace
     {
         ui::CloseList();
         KillTimer(g_flyout, kMeterTimer);
+        KillTimer(g_flyout, kTipTimer);
+        g_tipAim = g_tipRow = -1;
         ShowWindow(g_flyout, SW_HIDE);
         g_hiddenAt = GetTickCount64();
     }
@@ -458,6 +486,17 @@ namespace
         if (what == F_MIC) OpenMicList();
         else if (what == F_LINK) OpenSettings();
         else if (what >= 0 && what < ROW_COUNT) Toggle(what);
+    }
+
+    // Which row's dot/name is at p (-1 none).
+    int TipHit(POINT p)
+    {
+        for (int row = 0; row < ROW_COUNT; ++row)
+        {
+            RECT z = TipZone(row);
+            if (PtInRect(&z, p)) return row;
+        }
+        return -1;
     }
 
     LRESULT CALLBACK FlyoutProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -516,6 +555,14 @@ namespace
             return 0;
         case WM_TIMER:
         {
+            if (wp == kTipTimer)
+            {
+                KillTimer(hwnd, kTipTimer);
+                g_tipRow = g_tipAim;
+                g_shown.clear();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             ReadLive();
             std::wstring view = LiveView();
             if (view != g_shown)  // nothing visible changed: no repaint
@@ -528,13 +575,29 @@ namespace
         case WM_LBUTTONDOWN:
         {
             g_cues = false;
+            KillTimer(hwnd, kTipTimer);
+            g_tipAim = g_tipRow = -1;  // clicking hides the bubble until the mouse moves to another row
             const int what = HitTest({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
             if (what != -2) { g_focus = what; Activate(what); }
             return 0;
         }
         case WM_MOUSEMOVE:
         {
-            const int what = HitTest({GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+            const POINT p{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            const int what = HitTest(p);
+            if (const int aim = ui::ListOpen() ? -1 : TipHit(p); aim != g_tipAim)
+            {
+                g_tipAim = aim;
+                KillTimer(hwnd, kTipTimer);
+                if (g_tipRow >= 0 && aim >= 0) g_tipRow = aim;  // already showing: follow the mouse without a delay
+                else
+                {
+                    if (g_tipRow >= 0) { g_tipRow = -1; InvalidateRect(hwnd, nullptr, FALSE); }
+                    if (aim >= 0) SetTimer(hwnd, kTipTimer, kTipDelayMs, nullptr);
+                }
+                g_shown.clear();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             if (what != g_hot)
             {
                 g_hot = what;
@@ -546,6 +609,8 @@ namespace
         }
         case WM_MOUSELEAVE:
             g_hot = -2;
+            KillTimer(hwnd, kTipTimer);
+            g_tipAim = g_tipRow = -1;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         case WM_SETCURSOR:
