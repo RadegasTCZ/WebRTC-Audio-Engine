@@ -34,6 +34,10 @@ namespace
     constexpr wchar_t kRunKey[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
     constexpr wchar_t kRunName[] = L"WebRTC Audio Engine";
     constexpr wchar_t kUninstallKey[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\WebrtcAudioEngine";
+    // Device Setup Manager's record of the AddSoftware version it ran (name = AddSoftware in the app INF). If it
+    // stays, reinstalling the same version is skipped ("Software ... was not newer") and the app never comes back.
+    constexpr wchar_t kDsmSoftwareKey[] =
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\DeviceSetup\\DeviceSoftware\\WebrtcAudioEngineSettings";
 
     std::wstring Known(REFKNOWNFOLDERID id)
     {
@@ -513,6 +517,7 @@ namespace setup
         }
         RemoveDirectoryW(InstallDir().c_str());
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, app::kAppKey);
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kDsmSoftwareKey, KEY_WOW64_64KEY, 0);
         Log(L"uninstalled (settings kept)");
         return 0;
     }
