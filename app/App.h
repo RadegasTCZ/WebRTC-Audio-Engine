@@ -7,6 +7,12 @@
 // Shared between the main settings window (SettingsApp.cpp) and the tray flyout (TrayFlyout.cpp).
 namespace app
 {
+    inline constexpr wchar_t kExeName[] = L"WebrtcAudioEngineSettings.exe";
+    inline constexpr wchar_t kWindowClass[] = L"WebrtcAudioEngineSettings";  // main window (finds the running copy)
+    // In the settings key: the installer bumps it, every running copy exits when it changes (Setup.cpp).
+    inline constexpr wchar_t kGenerationValue[] = L"AppGeneration";
+    DWORD AppGeneration();
+
     // Restores and focuses the full settings window; micGuid ("{...}") preselects that microphone.
     void ShowMainWindow(const wchar_t* micGuid = nullptr);
     void ExitApp();          // removes the tray icon and quits
@@ -32,6 +38,5 @@ namespace tray
 namespace setup
 {
     int Install(const wchar_t* cmdLine);    // "/install [version]": Program Files, shortcut, sign-in start, Apps & features
-    int Uninstall(const wchar_t* cmdLine);  // "/uninstall": removes all that (settings are kept)
-    int Quit();                             // "/quit": the running app in this session exits
+    int Uninstall();                        // "/uninstall": removes all that (settings are kept)
 }

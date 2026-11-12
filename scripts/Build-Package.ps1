@@ -17,9 +17,10 @@ $signtool = Find-KitTool 'signtool.exe'
 
 # Windows keeps an installed package whose DriverVer did not change ("already exists"), even if the files
 # are new. Every staged INF gets today's date and a version that grows with every build: major.minor from
-# the source INF, then days since 2026-01-01 and 2-second steps since midnight (each field below 65536).
+# the source INF, then days since 2026-01-01 and 2-second steps since midnight (each field below 65536),
+# in local standard time (summer time ignored) so the number never goes back when the clocks change.
 # The app INF's SoftwareVersion follows it too: Windows runs the app's installer once per SoftwareVersion.
-$now = Get-Date
+$now = [datetime]::UtcNow + [TimeZoneInfo]::Local.BaseUtcOffset
 $build = '{0}.{1}' -f [int]($now.Date - [datetime]'2026-01-01').TotalDays, [int][math]::Floor($now.TimeOfDay.TotalSeconds / 2)
 $payload = @{ component = $DllPath; app = $AppExe }
 

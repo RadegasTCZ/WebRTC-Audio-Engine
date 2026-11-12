@@ -10,7 +10,6 @@ $Script:ExtensionInf    = 'WebrtcAudioEngine-Extension.inf'
 $Script:AppInf          = 'WebrtcAudioEngine-App.inf'
 $Script:SwcHardwareId   = 'SWC\VEN_WRTC&AUDIO_EFFECTPACK_WEBRTCENGINE'
 $Script:AppHardwareId   = 'SWC\VEN_WRTC&WEBRTCENGINE_SETTINGSAPP'
-$Script:DefaultAppExe   = Join-Path $WorkspaceRoot 'build\Release\WebrtcAudioEngineSettings.exe'
 $Script:EffectPackId    = '{9879C461-0BA4-4A7B-9F35-3C04EAC1772D}'
 
 function Find-KitTool([string]$Name) {

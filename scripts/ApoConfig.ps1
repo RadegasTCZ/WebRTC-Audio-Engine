@@ -5,6 +5,29 @@ $Script:LogDir = Join-Path $env:ProgramData 'WebrtcVoiceApo'   # the effect's lo
 # Workspace layout: <workspace>\webrtc_driver\scripts\  ->  <workspace>\build, \logs
 $Script:WorkspaceRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $Script:DefaultDll    = Join-Path $WorkspaceRoot 'build\Release\WebrtcVoiceApo.dll'
+$Script:DefaultAppExe   = Join-Path $WorkspaceRoot 'build\Release\WebrtcAudioEngineSettings.exe'
+$Script:InstalledAppExe = Join-Path $env:ProgramFiles 'WebrtcAudioEngine\WebrtcAudioEngineSettings.exe'
+$Script:SetupLog        = Join-Path $env:ProgramData 'WebrtcAudioEngine\setup.log'
+
+# Runs the settings app's installer mode and returns its exit code (0 = OK). Start-Process -Wait would also
+# wait for the tray app it starts; reading ExitCode needs the process handle taken while it runs.
+function Invoke-AppSetup([string]$Exe, [string]$Arguments) {
+    $p = Start-Process $Exe -ArgumentList $Arguments -PassThru
+    $null = $p.Handle
+    $p.WaitForExit()
+    $p.ExitCode
+}
+
+# Removes the installed settings app (settings are kept). Runs the uninstaller from a temporary copy:
+# the copy in Program Files cannot delete itself.
+function Uninstall-SettingsApp {
+    if (-not (Test-Path $InstalledAppExe)) { Write-Host 'Settings app is not installed.'; return }
+    $tmp = Join-Path $env:TEMP "WebrtcAudioEngine-uninstall-$PID.exe"
+    Copy-Item $InstalledAppExe $tmp -Force
+    try { $code = Invoke-AppSetup $tmp '/uninstall' } finally { Remove-Item $tmp -Force -EA SilentlyContinue }
+    if ($code) { throw "Removing the settings app failed (code $code); see $SetupLog" }
+    Write-Host 'Settings app removed (settings are kept).'
+}
 
 function Assert-Admin {
     $p = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()

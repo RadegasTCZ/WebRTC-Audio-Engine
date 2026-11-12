@@ -26,8 +26,7 @@ try {
 finally { Start-Audio }
 
 # The settings app Windows installed from the package (Program Files, Start menu, sign-in, Apps & features).
-$appExe = Join-Path $env:ProgramFiles 'WebrtcAudioEngine\WebrtcAudioEngineSettings.exe'
-if (Test-Path $appExe) { (Start-Process $appExe -ArgumentList '/uninstall' -PassThru).WaitForExit(); Write-Host 'Settings app removed (settings are kept).' }
+Uninstall-SettingsApp
 
 if ($RemoveCert) { & (Join-Path $PSScriptRoot 'New-TestCert.ps1') -Remove }
 Write-Host "`nEffect pack removed."

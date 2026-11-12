@@ -4,10 +4,14 @@
 // /install [version]: run by Windows (as SYSTEM, from the driver store) when the driver package's software
 // component installs, or by Install-SettingsApp.ps1 from an admin shell. Copies this exe to Program Files,
 // adds the Start-menu shortcut, the tray icon at sign-in (HKLM Run), an Apps & features entry, prepares
-// the settings key (Users may change values) and starts the tray icon for whoever is signed in.
-// /uninstall: from Apps & features (asks for admin) or the uninstall scripts. Undoes all of that except
-// the settings themselves.
-// A short log goes to %ProgramData%\WebrtcAudioEngine\setup.log.
+// the settings key (Users may change values) and starts the tray icon for the signed-in users.
+// /uninstall: from Apps & features (hands over to a temporary copy, which asks for admin rights) or the
+// scripts (which run it from a temporary copy themselves). Undoes all of that except the settings.
+//
+// Closing running copies: the installer bumps AppGeneration in the settings key; every running copy
+// watches that key (all sessions, any elevation) and exits when it changes. Copies too old to know this
+// are ended by force as a last resort.
+// A short log goes to %ProgramData%\WebrtcAudioEngine\setup.log (folder writable by SYSTEM and admins only).
 #include "App.h"
 #include <aclapi.h>
 #include <sddl.h>
@@ -19,11 +23,11 @@
 #include <cstdarg>
 #include <cstdio>
 #include <string>
+#include <vector>
 #include "../src/Settings.h"
 
 namespace
 {
-    constexpr wchar_t kExeName[] = L"WebrtcAudioEngineSettings.exe";
     constexpr wchar_t kDirName[] = L"WebrtcAudioEngine";
     constexpr wchar_t kShortcut[] = L"WebRTC Audio Engine Settings.lnk";
     constexpr wchar_t kRunKey[] = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -39,7 +43,7 @@ namespace
         return s;
     }
     std::wstring InstallDir() { return Known(FOLDERID_ProgramFiles) + L"\\" + kDirName; }
-    std::wstring InstalledExe() { return InstallDir() + L"\\" + kExeName; }
+    std::wstring InstalledExe() { return InstallDir() + L"\\" + app::kExeName; }
     std::wstring ShortcutPath() { return Known(FOLDERID_CommonPrograms) + L"\\" + kShortcut; }
     std::wstring SelfPath()
     {
@@ -47,23 +51,20 @@ namespace
         const DWORD n = GetModuleFileNameW(nullptr, p, ARRAYSIZE(p));
         return std::wstring(p, n);
     }
+    std::wstring Quoted(const std::wstring& s) { return L"\"" + s + L"\""; }
 
-    void Log(const wchar_t* fmt, ...)
+    bool TokenIs(WELL_KNOWN_SID_TYPE type)
     {
-        const std::wstring dir = Known(FOLDERID_ProgramData) + L"\\" + kDirName;
-        CreateDirectoryW(dir.c_str(), nullptr);
-        FILE* f = nullptr;
-        if (_wfopen_s(&f, (dir + L"\\setup.log").c_str(), L"a, ccs=UTF-8") != 0 || !f) return;
-        SYSTEMTIME t;
-        GetLocalTime(&t);
-        fwprintf(f, L"%04u-%02u-%02u %02u:%02u:%02u  ", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
-        va_list a;
-        va_start(a, fmt);
-        vfwprintf(f, fmt, a);
-        va_end(a);
-        fputwc(L'\n', f);
-        fclose(f);
+        HANDLE tok = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
+        BYTE buf[256];
+        DWORD n = 0;
+        const bool is = GetTokenInformation(tok, TokenUser, buf, sizeof(buf), &n) &&
+                        IsWellKnownSid(reinterpret_cast<TOKEN_USER*>(buf)->User.Sid, type);
+        CloseHandle(tok);
+        return is;
     }
+    bool IsSystem() { return TokenIs(WinLocalSystemSid); }
 
     bool Elevated()
     {
@@ -76,52 +77,95 @@ namespace
         return ok;
     }
 
-    // Closes every other running copy of the app: politely in this session (tray icon removed cleanly),
-    // then by force (copies in other sessions, e.g. when Windows runs us as SYSTEM).
-    bool RunInUserSessions(const std::wstring& exe, const wchar_t* args, DWORD waitMs);
-    void CloseRunningApps()
+    // ------------------------------------------------------------------ log
+
+    // True if `path` is owned by SYSTEM or Administrators (so no ordinary user prepared it for us).
+    bool OwnedByAdmins(const std::wstring& path)
     {
-        // As SYSTEM (session 0) we cannot post to windows on the users' desktops: run "/quit" there instead.
-        if (!RunInUserSessions(SelfPath(), L"/quit", 3000))
-            setup::Quit();
-        const DWORD self = GetCurrentProcessId();
-        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        if (snap == INVALID_HANDLE_VALUE) return;
-        PROCESSENTRY32W pe{sizeof(pe)};
-        for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe))
-        {
-            if (pe.th32ProcessID == self || _wcsicmp(pe.szExeFile, kExeName) != 0) continue;
-            HANDLE p = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pe.th32ProcessID);
-            if (!p) continue;
-            if (WaitForSingleObject(p, 2000) == WAIT_TIMEOUT)
-            {
-                TerminateProcess(p, 0);
-                WaitForSingleObject(p, 5000);
-                Log(L"closed running copy (pid %lu) by force", pe.th32ProcessID);
-            }
-            CloseHandle(p);
-        }
-        CloseHandle(snap);
+        PSID owner = nullptr;
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        if (GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &sd) != ERROR_SUCCESS)
+            return false;
+        const bool ok = IsWellKnownSid(owner, WinLocalSystemSid) || IsWellKnownSid(owner, WinBuiltinAdministratorsSid);
+        LocalFree(sd);
+        return ok;
     }
+
+    // %ProgramData%\WebrtcAudioEngine, writable by SYSTEM and Administrators only, or empty if that cannot be
+    // guaranteed (then nothing is logged). We write there as SYSTEM: a folder an ordinary user could create
+    // or write into would let them redirect the log onto any file (links), like Initialize-LogDir guards against.
+    const std::wstring& LogDir()
+    {
+        static std::wstring dir = [] {
+            const std::wstring d = Known(FOLDERID_ProgramData) + L"\\" + kDirName;
+            PSECURITY_DESCRIPTOR sd = nullptr;
+            // Protected DACL: SYSTEM and Administrators full control, Users read.
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)",
+                                                                       SDDL_REVISION_1, &sd, nullptr))
+                return std::wstring();
+            SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
+            std::wstring result;
+            if (CreateDirectoryW(d.c_str(), &sa))
+                result = d;
+            else if (GetLastError() == ERROR_ALREADY_EXISTS)
+            {
+                const DWORD attr = GetFileAttributesW(d.c_str());
+                if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) && !(attr & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                    OwnedByAdmins(d))
+                {
+                    // Re-apply the ACL (an older build left the inherited ProgramData one: Users could add files).
+                    BOOL present = FALSE, defaulted = FALSE;
+                    PACL dacl = nullptr;
+                    GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted);
+                    if (SetNamedSecurityInfoW(const_cast<LPWSTR>(d.c_str()), SE_FILE_OBJECT,
+                                              DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr, nullptr, dacl,
+                                              nullptr) == ERROR_SUCCESS)
+                    {
+                        // A log a user planted earlier is not ours: start a new one.
+                        const std::wstring log = d + L"\\setup.log";
+                        if (GetFileAttributesW(log.c_str()) != INVALID_FILE_ATTRIBUTES && !OwnedByAdmins(log)) DeleteFileW(log.c_str());
+                        result = d;
+                    }
+                }
+            }
+            LocalFree(sd);
+            return result;
+        }();
+        return dir;
+    }
+
+    void Log(const wchar_t* fmt, ...)
+    {
+        if (LogDir().empty()) return;
+        const std::wstring path = LogDir() + L"\\setup.log";
+        HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return;
+        wchar_t line[1024];
+        SYSTEMTIME t;
+        GetLocalTime(&t);
+        int n = swprintf_s(line, L"%04u-%02u-%02u %02u:%02u:%02u  ", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        va_list a;
+        va_start(a, fmt);
+        const int m = _vsnwprintf_s(line + n, ARRAYSIZE(line) - n - 2, _TRUNCATE, fmt, a);
+        va_end(a);
+        n += m < 0 ? static_cast<int>(wcslen(line + n)) : m;
+        line[n++] = L'\r';
+        line[n++] = L'\n';
+        char utf8[3 * ARRAYSIZE(line)];
+        const int bytes = WideCharToMultiByte(CP_UTF8, 0, line, n, utf8, sizeof(utf8), nullptr, nullptr);
+        DWORD written = 0;
+        WriteFile(h, utf8, static_cast<DWORD>(bytes), &written, nullptr);
+        CloseHandle(h);
+    }
+
+    // ------------------------------------------------------------------ registry
 
     LONG SetString(HKEY k, const wchar_t* name, const std::wstring& v)
     {
         return RegSetValueExW(k, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(v.c_str()), static_cast<DWORD>((v.size() + 1) * sizeof(wchar_t)));
     }
     LONG SetDword(HKEY k, const wchar_t* name, DWORD v) { return RegSetValueExW(k, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v)); }
-
-    bool MakeShortcut(const std::wstring& target)
-    {
-        IShellLinkW* link = nullptr;
-        if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link)))) return false;
-        link->SetPath(target.c_str());
-        link->SetDescription(L"Echo cancellation, noise suppression, automatic gain and cleanup for your microphone");
-        IPersistFile* file = nullptr;
-        bool ok = SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file))) && SUCCEEDED(file->Save(ShortcutPath().c_str(), TRUE));
-        if (file) file->Release();
-        link->Release();
-        return ok;
-    }
 
     // HKLM\SOFTWARE\WebrtcVoiceApo (+ Devices): Users, the audio engine (LOCAL SERVICE) and app containers
     // (Windows Settings toggles our effects through the APO) may change values and add microphone subkeys.
@@ -161,90 +205,186 @@ namespace
         return r;
     }
 
-    // Runs "exe args" in every signed-in session as that user (not elevated), optionally waiting for it.
-    // Needs SYSTEM rights (Windows running us from the driver package); returns false without them.
-    bool RunInUserSessions(const std::wstring& exe, const wchar_t* args, DWORD waitMs)
+    // ------------------------------------------------------------------ running copies
+
+    struct Proc
     {
-        WTS_SESSION_INFOW* sessions = nullptr;
-        DWORD count = 0;
-        bool system = false;
-        if (!WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions, &count)) return false;
-        for (DWORD i = 0; i < count; ++i)
+        DWORD pid;
+        HANDLE handle;
+    };
+
+    // Other running copies of the app, except us and the process that started us (the non-elevated
+    // "/uninstall" from Apps & features that handed over to this copy).
+    std::vector<Proc> OtherCopies(DWORD access)
+    {
+        std::vector<Proc> list;
+        const DWORD self = GetCurrentProcessId();
+        DWORD parent = 0;
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == INVALID_HANDLE_VALUE) return list;
+        PROCESSENTRY32W pe{sizeof(pe)};
+        for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe))
+            if (pe.th32ProcessID == self) parent = pe.th32ParentProcessID;
+        for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe))
         {
-            if (sessions[i].State != WTSActive) continue;
-            HANDLE user = nullptr;
-            if (!WTSQueryUserToken(sessions[i].SessionId, &user))
-            {
-                if (GetLastError() == ERROR_PRIVILEGE_NOT_HELD) break;  // not SYSTEM
-                continue;
-            }
-            system = true;
-            void* env = nullptr;
-            CreateEnvironmentBlock(&env, user, FALSE);
-            std::wstring cmd = L"\"" + exe + L"\" " + args;
-            STARTUPINFOW si{sizeof(si)};
-            si.lpDesktop = const_cast<LPWSTR>(L"winsta0\\default");
-            PROCESS_INFORMATION pi{};
-            if (CreateProcessAsUserW(user, exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, env, nullptr, &si, &pi))
-            {
-                Log(L"ran %s in session %lu", args, sessions[i].SessionId);
-                if (waitMs) WaitForSingleObject(pi.hProcess, waitMs);
-                CloseHandle(pi.hThread);
-                CloseHandle(pi.hProcess);
-            }
-            else
-                Log(L"could not run %s in session %lu (error %lu)", args, sessions[i].SessionId, GetLastError());
-            if (env) DestroyEnvironmentBlock(env);
-            CloseHandle(user);
+            if (pe.th32ProcessID == self || pe.th32ProcessID == parent || _wcsicmp(pe.szExeFile, app::kExeName) != 0) continue;
+            if (HANDLE h = OpenProcess(access, FALSE, pe.th32ProcessID)) list.push_back({pe.th32ProcessID, h});
+            else if (GetLastError() != ERROR_INVALID_PARAMETER)  // that one: it has just exited
+                Log(L"cannot open running copy (pid %lu, error %lu)", pe.th32ProcessID, GetLastError());
         }
-        WTSFreeMemory(sessions);
-        return system;
+        CloseHandle(snap);
+        return list;
     }
 
-    // Starts the tray icon for the signed-in users; without SYSTEM rights (admin shell) in this session.
-    void StartTray(const std::wstring& exe)
+    // Asks every running copy to exit (AppGeneration changes; they watch the settings key) and waits for
+    // them; copies that do not react within 5 s (builds before AppGeneration) are ended by force.
+    void CloseRunningApps()
     {
-        if (RunInUserSessions(exe, L"/tray", 0)) return;
-        std::wstring cmd = L"\"" + exe + L"\" /tray";
+        HKEY k = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, 0, KEY_SET_VALUE, &k) == ERROR_SUCCESS)
+        {
+            SetDword(k, app::kGenerationValue, app::AppGeneration() + 1);
+            RegCloseKey(k);
+        }
+        std::vector<Proc> copies = OtherCopies(PROCESS_TERMINATE | SYNCHRONIZE);
+        const ULONGLONG deadline = GetTickCount64() + 5000;
+        for (Proc& p : copies)
+        {
+            const ULONGLONG now = GetTickCount64();
+            if (WaitForSingleObject(p.handle, now < deadline ? static_cast<DWORD>(deadline - now) : 0) == WAIT_TIMEOUT)
+            {
+                TerminateProcess(p.handle, 0);
+                WaitForSingleObject(p.handle, 5000);
+                Log(L"closed running copy (pid %lu) by force", p.pid);
+            }
+            CloseHandle(p.handle);
+        }
+    }
+
+    // ------------------------------------------------------------------ starting the tray
+
+    void Launch(HANDLE token, const std::wstring& exe, const std::wstring& args, const wchar_t* who)
+    {
+        std::wstring cmd = Quoted(exe) + L" " + args;
         STARTUPINFOW si{sizeof(si)};
         PROCESS_INFORMATION pi{};
-        if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+        BOOL ok = FALSE;
+        if (IsSystem())
         {
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
+            void* env = nullptr;
+            CreateEnvironmentBlock(&env, token, FALSE);
+            si.lpDesktop = const_cast<LPWSTR>(L"winsta0\\default");
+            ok = CreateProcessAsUserW(token, exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, env, nullptr, &si, &pi);
+            if (env) DestroyEnvironmentBlock(env);
         }
+        else if (token)
+            ok = CreateProcessWithTokenW(token, 0, exe.c_str(), cmd.data(), 0, nullptr, nullptr, &si, &pi);
+        else
+            ok = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi);
+        if (!ok)
+        {
+            Log(L"could not start the tray %s (error %lu)", who, GetLastError());
+            return;
+        }
+        Log(L"tray started %s", who);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
     }
 
-    // The word after the switch, e.g. "/install 0.14.320.123" -> "0.14.320.123".
+    // Starts the tray icon for the signed-in users, as them (not elevated). As SYSTEM: in every session
+    // with a user (also switched-away ones); nobody signed in: nothing, the Run entry starts it at sign-in.
+    // From an admin shell: as the desktop user (Explorer's token), else with our own token.
+    void StartTray(const std::wstring& exe)
+    {
+        if (IsSystem())
+        {
+            WTS_SESSION_INFOW* sessions = nullptr;
+            DWORD count = 0;
+            if (!WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &sessions, &count)) return;
+            for (DWORD i = 0; i < count; ++i)
+            {
+                if (sessions[i].State != WTSActive && sessions[i].State != WTSDisconnected) continue;
+                HANDLE user = nullptr;
+                if (!WTSQueryUserToken(sessions[i].SessionId, &user)) continue;  // no user in this session
+                wchar_t who[32];
+                swprintf_s(who, L"in session %lu", sessions[i].SessionId);
+                Launch(user, exe, L"/tray", who);
+                CloseHandle(user);
+            }
+            WTSFreeMemory(sessions);
+            return;
+        }
+        HANDLE desktopUser = nullptr;
+        DWORD pid = 0;
+        if (HWND shell = GetShellWindow()) GetWindowThreadProcessId(shell, &pid);
+        if (HANDLE p = pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr)
+        {
+            HANDLE t = nullptr;
+            if (OpenProcessToken(p, TOKEN_DUPLICATE, &t))
+            {
+                DuplicateTokenEx(t, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID,
+                                 nullptr, SecurityImpersonation, TokenPrimary, &desktopUser);
+                CloseHandle(t);
+            }
+            CloseHandle(p);
+        }
+        Launch(desktopUser, exe, L"/tray", desktopUser ? L"as the desktop user" : L"in this session");
+        if (desktopUser) CloseHandle(desktopUser);
+    }
+
+    // The word after the switch, e.g. "/install 0.14.320.123" -> "0.14.320.123" (quotes dropped).
     std::wstring Argument(const wchar_t* cmdLine, const wchar_t* sw)
     {
         const wchar_t* p = wcsstr(cmdLine, sw);
         if (!p) return L"";
         p += wcslen(sw);
-        while (*p == L' ') ++p;
+        while (*p == L' ' || *p == L'"') ++p;
         std::wstring v;
-        while (*p && *p != L' ' && *p != L'/') v += *p++;
+        while (*p && *p != L' ' && *p != L'/' && *p != L'"') v += *p++;
         return v;
     }
+
+    // Runs `exe args` (asking for admin rights if `elevate`), optionally waiting for its exit code.
+    DWORD Run(const std::wstring& exe, const wchar_t* args, bool elevate, bool wait)
+    {
+        SHELLEXECUTEINFOW sei{sizeof(sei)};
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = elevate ? L"runas" : nullptr;
+        sei.lpFile = exe.c_str();
+        sei.lpParameters = args;
+        sei.nShow = SW_HIDE;
+        if (!ShellExecuteExW(&sei)) return GetLastError();
+        DWORD code = 0;
+        if (sei.hProcess)
+        {
+            if (wait)
+            {
+                WaitForSingleObject(sei.hProcess, INFINITE);
+                GetExitCodeProcess(sei.hProcess, &code);
+            }
+            CloseHandle(sei.hProcess);
+        }
+        return code;
+    }
+}
+
+DWORD app::AppGeneration()
+{
+    DWORD v = 0, size = sizeof(v);
+    RegGetValueW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, kGenerationValue, RRF_RT_REG_DWORD, nullptr, &v, &size);
+    return v;
 }
 
 namespace setup
 {
-    // "/quit": asks the running app in this session to exit (removes its tray icon cleanly).
-    int Quit()
-    {
-        const UINT quit = RegisterWindowMessageW(L"WebrtcAudioEngine.Quit");
-        if (HWND w = FindWindowW(L"WebrtcAudioEngineSettings", nullptr)) PostMessageW(w, quit, 0, 0);
-        return 0;
-    }
-
     int Install(const wchar_t* cmdLine)
     {
+        if (!Elevated()) return ERROR_ACCESS_DENIED;  // before any logging: only admins/SYSTEM write the log
         const std::wstring version = Argument(cmdLine, L"/install");
-        Log(L"install %s from %s", version.empty() ? L"(no version)" : version.c_str(), SelfPath().c_str());
-        if (!Elevated()) { Log(L"failed: needs admin rights"); return ERROR_ACCESS_DENIED; }
+        Log(L"install %s from %s%s", version.empty() ? L"(no version)" : version.c_str(), SelfPath().c_str(), IsSystem() ? L" (SYSTEM)" : L"");
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+        if (const LONG r = PrepareSettingsKey(); r != ERROR_SUCCESS) Log(L"warning: settings key not prepared (error %ld)", r);
         CloseRunningApps();
         const std::wstring dir = InstallDir(), exe = InstalledExe(), self = SelfPath();
         CreateDirectoryW(dir.c_str(), nullptr);
@@ -257,15 +397,28 @@ namespace setup
             {
                 const DWORD e = GetLastError();
                 Log(L"failed: could not copy to %s (error %lu)", exe.c_str(), e);
+                if (GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) StartTray(exe);  // give the users their tray back
                 return static_cast<int>(e);
             }
         }
 
-        if (!MakeShortcut(exe)) Log(L"warning: Start-menu shortcut not created");
+        IShellLinkW* link = nullptr;
+        bool shortcut = false;
+        if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))))
+        {
+            link->SetPath(exe.c_str());
+            link->SetDescription(L"Echo cancellation, noise suppression, automatic gain and cleanup for your microphone");
+            IPersistFile* file = nullptr;
+            shortcut = SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file))) && SUCCEEDED(file->Save(ShortcutPath().c_str(), TRUE));
+            if (file) file->Release();
+            link->Release();
+        }
+        if (!shortcut) Log(L"warning: Start-menu shortcut not created");
+
         HKEY k = nullptr;
         if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kRunKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS)
         {
-            SetString(k, kRunName, L"\"" + exe + L"\" /tray");
+            SetString(k, kRunName, Quoted(exe) + L" /tray");
             RegCloseKey(k);
         }
         if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS)
@@ -275,44 +428,35 @@ namespace setup
             SetString(k, L"Publisher", L"RadegasTCZ");
             SetString(k, L"DisplayIcon", exe + L",0");
             SetString(k, L"InstallLocation", dir);
-            SetString(k, L"UninstallString", L"\"" + exe + L"\" /uninstall");
+            SetString(k, L"UninstallString", Quoted(exe) + L" /uninstall");
             SetDword(k, L"NoModify", 1);
             SetDword(k, L"NoRepair", 1);
             WIN32_FILE_ATTRIBUTE_DATA fa{};
             if (GetFileAttributesExW(exe.c_str(), GetFileExInfoStandard, &fa)) SetDword(k, L"EstimatedSize", fa.nFileSizeLow / 1024 + 1);
             RegCloseKey(k);
         }
-        if (const LONG r = PrepareSettingsKey(); r != ERROR_SUCCESS) Log(L"warning: settings key not prepared (error %ld)", r);
 
         StartTray(exe);
         Log(L"installed %s", exe.c_str());
         return 0;
     }
 
-    int Uninstall(const wchar_t* cmdLine)
+    int Uninstall()
     {
-        if (!Elevated())
+        const std::wstring self = SelfPath();
+        // Started from Program Files (Apps & features): this exe cannot delete itself while it runs. Hand over
+        // to a temporary copy (it asks for admin rights) and exit, so the copy can remove the folder.
+        if (_wcsicmp(self.c_str(), InstalledExe().c_str()) == 0)
         {
-            // From Apps & features: ask for admin rights and run again.
-            const std::wstring self = SelfPath();
-            SHELLEXECUTEINFOW sei{sizeof(sei)};
-            sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-            sei.lpVerb = L"runas";
-            sei.lpFile = self.c_str();
-            sei.lpParameters = L"/uninstall";
-            sei.nShow = SW_HIDE;
-            if (!ShellExecuteExW(&sei)) return static_cast<int>(GetLastError());
-            DWORD code = 1;
-            if (sei.hProcess)
-            {
-                WaitForSingleObject(sei.hProcess, INFINITE);
-                GetExitCodeProcess(sei.hProcess, &code);
-                CloseHandle(sei.hProcess);
-            }
-            return static_cast<int>(code);
+            wchar_t tmp[MAX_PATH];
+            GetTempPathW(MAX_PATH, tmp);
+            const std::wstring copy = std::wstring(tmp) + L"WebrtcAudioEngine-uninstall-" + std::to_wstring(GetCurrentProcessId()) + L".exe";
+            if (!CopyFileW(self.c_str(), copy.c_str(), FALSE)) return static_cast<int>(GetLastError());
+            return static_cast<int>(Run(copy, L"/uninstall /selfdelete", !Elevated(), false));
         }
-        (void)cmdLine;
-        Log(L"uninstall from %s", SelfPath().c_str());
+        if (!Elevated()) return static_cast<int>(Run(self, L"/uninstall", true, true));
+
+        Log(L"uninstall from %s", self.c_str());
         CloseRunningApps();
         HKEY k = nullptr;
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kRunKey, 0, KEY_SET_VALUE, &k) == ERROR_SUCCESS)
@@ -323,23 +467,21 @@ namespace setup
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, kUninstallKey);
         DeleteFileW(ShortcutPath().c_str());
 
-        // The folder holds the running exe when started from Apps & features: delete it once we have exited.
-        const std::wstring dir = InstallDir();
-        if (DeleteFileW(InstalledExe().c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND)
-            RemoveDirectoryW(dir.c_str());
-        else
+        // The copy in Program Files may still be running for a moment (the Apps & features process that
+        // handed over to us): retry for up to 15 s.
+        const std::wstring exe = InstalledExe();
+        DWORD err = ERROR_SUCCESS;
+        for (int i = 0; i < 60; ++i)
         {
-            wchar_t sys[MAX_PATH];
-            GetSystemDirectoryW(sys, MAX_PATH);
-            const std::wstring cmdExe = std::wstring(sys) + L"\\cmd.exe";
-            std::wstring cmd = L"cmd.exe /d /c ping -n 3 127.0.0.1 >nul & rmdir /s /q \"" + dir + L"\"";
-            STARTUPINFOW si{sizeof(si)};
-            PROCESS_INFORMATION pi{};
-            if (CreateProcessW(cmdExe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, sys, &si, &pi))
-            {
-                CloseHandle(pi.hThread);
-                CloseHandle(pi.hProcess);
-            }
+            if (DeleteFileW(exe.c_str()) || (err = GetLastError()) == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) { err = ERROR_SUCCESS; break; }
+            Sleep(250);
+        }
+        RemoveDirectoryW(InstallDir().c_str());
+        if (wcsstr(GetCommandLineW(), L"/selfdelete")) MoveFileExW(self.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+        if (err != ERROR_SUCCESS)
+        {
+            Log(L"failed: could not delete %s (error %lu)", exe.c_str(), err);
+            return static_cast<int>(err);
         }
         Log(L"uninstalled (settings kept)");
         return 0;

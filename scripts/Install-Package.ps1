@@ -48,6 +48,5 @@ Get-PnpDevice -PresentOnly | Where-Object { $_.HardwareID -contains $SwcHardware
     ForEach-Object { Write-Host "Device: $($_.Status) $($_.Class) '$($_.FriendlyName)' $($_.InstanceId)" }
 $reg = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\EffectsPacks\$EffectPackId"
 Write-Host "Registered with the audio system (MMDevices\EffectsPacks): $(Test-Path $reg)"
-$appExe = Join-Path $env:ProgramFiles 'WebrtcAudioEngine\WebrtcAudioEngineSettings.exe'
-Write-Host "Settings app: $(if (Test-Path $appExe) { (Get-Item $appExe).LastWriteTime.ToString('g') + ' ' + $appExe } else { 'not installed yet (see ' + $env:ProgramData + '\WebrtcAudioEngine\setup.log)' })"
+Write-Host "Settings app: $(if (Test-Path $InstalledAppExe) { (Get-Item $InstalledAppExe).LastWriteTime.ToString('g') + ' ' + $InstalledAppExe } else { "not installed yet (see $SetupLog)" })"
 Write-Host 'Now check Settings > System > Sound > (microphone) > Audio enhancements.'

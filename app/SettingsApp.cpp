@@ -137,7 +137,6 @@ namespace
 
     HWND g_wnd = nullptr;
     UINT g_showMsg = 0;          // "show your settings window" (sent by a second launch)
-    UINT g_quitMsg = 0;          // "exit" (sent by the installer before it replaces the exe)
     UINT g_dpi = 96;
     std::vector<app::Mic> g_mics;  // [0] = "Default (all microphones)"
     int g_sel = 0;
@@ -648,11 +647,6 @@ namespace
             app::ShowMainWindow();
             return 0;
         }
-        if (msg == g_quitMsg && g_quitMsg)
-        {
-            app::ExitApp();
-            return 0;
-        }
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
 }
@@ -675,15 +669,13 @@ void app::ExitApp()
 
 // "WebrtcAudioEngineSettings.exe"        : tray + open the settings window
 // "WebrtcAudioEngineSettings.exe /tray"  : tray only (started at sign-in)
-// "... /install [version]", "... /uninstall", "... /quit": set up / remove / close the app (Setup.cpp, no window)
+// "... /install [version]", "... /uninstall": set up / remove the app (Setup.cpp, no window)
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
 {
     if (cmdLine && wcsstr(cmdLine, L"/install")) return setup::Install(cmdLine);
-    if (cmdLine && wcsstr(cmdLine, L"/uninstall")) return setup::Uninstall(cmdLine);
-    if (cmdLine && wcsstr(cmdLine, L"/quit")) return setup::Quit();
+    if (cmdLine && wcsstr(cmdLine, L"/uninstall")) return setup::Uninstall();
     const bool trayOnly = cmdLine && wcsstr(cmdLine, L"/tray") != nullptr;
     g_showMsg = RegisterWindowMessageW(L"WebrtcAudioEngine.ShowSettings");
-    g_quitMsg = RegisterWindowMessageW(L"WebrtcAudioEngine.Quit");
 
     // Single instance: a second launch asks the running one to show its window.
     // ERROR_ACCESS_DENIED: the running copy is elevated, so its mutex is not ours to open, but it exists.
@@ -692,7 +684,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
     if (mutexErr == ERROR_ALREADY_EXISTS || (!instanceMutex && mutexErr == ERROR_ACCESS_DENIED))
     {
         if (!trayOnly)
-            if (HWND other = FindWindowW(L"WebrtcAudioEngineSettings", nullptr))
+            if (HWND other = FindWindowW(app::kWindowClass, nullptr))
             {
                 AllowSetForegroundWindow(ASFW_ANY);
                 PostMessageW(other, g_showMsg, 0, 0);
@@ -706,7 +698,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
     wc.lpfnWndProc = WndProc;
     wc.hInstance = inst;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"WebrtcAudioEngineSettings";
+    wc.lpszClassName = app::kWindowClass;
     g_dpi = GetDpiForSystem();
     // App icon from the resources (SettingsApp.rc); the tray icon is drawn at runtime in TrayFlyout.cpp.
     wc.hIcon = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetricsForDpi(SM_CXICON, g_dpi),
@@ -733,7 +725,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
         ShowWindow(g_wnd, show);
 
     // Refresh when the settings change elsewhere (scripts, another tool), including the per-microphone
-    // subkeys. If the key does not exist yet, look again every few seconds.
+    // subkeys. If the key does not exist yet, look again every few seconds. AppGeneration changing means
+    // the installer is replacing or removing the app: exit.
+    const DWORD generation = app::AppGeneration();
     HKEY key = nullptr;
     HANDLE changed = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     auto watch = [&] {
@@ -754,6 +748,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
         const DWORD r = MsgWaitForMultipleObjects(1, &changed, FALSE, key ? INFINITE : 5000, QS_ALLINPUT);
         if (r == WAIT_OBJECT_0 || (r == WAIT_TIMEOUT && watch()))
         {
+            if (app::AppGeneration() != generation)
+            {
+                app::ExitApp();  // WM_QUIT follows
+                continue;
+            }
             const bool custom = SelectedGuid() && Settings::IsDeviceCustom(SelectedGuid());
             if (custom != g_custom || !(Settings::ReadFromRegistry(Scope()) == g_current))
                 LoadUi();
