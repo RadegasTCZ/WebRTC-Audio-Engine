@@ -33,7 +33,7 @@ cmake --build ..\build --config Release
 .\scripts\Check-CpuSafety.ps1                     # every AVX instruction is behind a CPU check (runs on any x64 CPU)
 ```
 
-## Install (admin PowerShell, test machines with test signing on)
+## Install (admin PowerShell)
 ```powershell
 .\scripts\New-TestCert.ps1          # once: test-signing certificate (remove later with -Remove)
 .\scripts\Build-Package.ps1         # stage + sign the driver packages into ..\build\package
@@ -48,6 +48,21 @@ package, which adds it to Program Files, the Start menu, sign-in (tray icon) and
 comes back with the next driver version.
 
 Uninstall everything: `.\scripts\Uninstall-Package.ps1` (settings are kept).
+
+Test signing mode is not needed: the packages are user-mode only, so Windows only has to trust the signing
+certificate (New-TestCert.ps1 puts it in LocalMachine Root + TrustedPublisher).
+
+## Installer (MSI)
+```powershell
+dotnet tool install --global wix --version 7.0.1   # once (.NET SDK needed); then: wix eula accept wix7
+.\scripts\Build-Package.ps1
+.\scripts\Build-Msi.ps1                            # -> ..\build\msi\WebrtcAudioEngine-<version>.msi
+```
+The MSI (installer/Product.wxs) copies the signed packages to Program Files\WebrtcAudioEngine\Driver. Its custom
+action (installer/SetupActions.cpp) trusts the bundled certificate (TrustedPublisher, plus Root if self-made),
+installs the packages and restarts Windows Audio. It is the only "Installed apps" entry: removing it removes the
+drivers, the settings app and any certificate trust it added (settings are kept). An upgrade removes the old
+version first. Requires Windows 11.
 
 ## Licence
 GPL-3.0-or-later (see `LICENSE`). WebRTC is BSD-licensed; SpeexDSP is BSD-licensed (`third_party/speexdsp/COPYING`).
