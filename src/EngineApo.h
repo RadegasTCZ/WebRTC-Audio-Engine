@@ -108,7 +108,7 @@ private:
     // in software. We apply it ourselves unless the device's volume is in hardware (USB/Bluetooth).
     IMMDevice* m_device = nullptr;       // our endpoint (from Initialize), for notifications
     bool m_hardwareVolumeBus = false;    // USB / Bluetooth endpoint (fallback guess)
-    int m_hardwareVolume = -1;           // endpoint reports a hardware volume control: 1/0, -1 unknown
+    int m_hardwareVolume = -1;           // QueryHardwareSupport says volume: 1/0, -1 unknown (logged only, unreliable)
     std::atomic<float> m_sliderDb{0.0f};
     std::atomic<bool> m_muted{false};    // endpoint mute (we replace the chain that applied it)
     float SliderGainDb(const Settings& s) const noexcept;

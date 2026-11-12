@@ -753,10 +753,10 @@ float CEngineApo::SliderGainDb(const Settings& s) const noexcept
         return VoiceProcessor::kMutedDb;  // silence, also with AGC2 on
     if (s.agcEnabled)              // AGC2 owns the level: the slider is ignored (owner's request)
         return 0.0f;
-    // auto: apply the slider unless the endpoint has its own volume control (reported by Windows; if it
-    // could not say, guessed from the bus: USB/Bluetooth devices have one).
-    const bool hardware = m_hardwareVolume >= 0 ? m_hardwareVolume == 1 : m_hardwareVolumeBus;
-    const bool apply = s.gainMode == 1 || (s.gainMode == 0 && !hardware);
+    // auto: apply the slider unless the microphone has its own volume control, guessed from the bus
+    // (USB/Bluetooth devices have one). Windows' QueryHardwareSupport is only logged: the Realtek built-in
+    // mic reports "hardware volume" too, yet its slider does nothing once our pack replaces Realtek's chain.
+    const bool apply = s.gainMode == 1 || (s.gainMode == 0 && !m_hardwareVolumeBus);
     return apply ? m_sliderDb.load(std::memory_order_relaxed) : 0.0f;
 }
 
