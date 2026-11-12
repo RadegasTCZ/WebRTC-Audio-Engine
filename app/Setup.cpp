@@ -38,6 +38,8 @@ namespace
     // stays, reinstalling the same version is skipped ("Software ... was not newer") and the app never comes back.
     constexpr wchar_t kDsmSoftwareKey[] =
         L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\DeviceSetup\\DeviceSoftware\\WebrtcAudioEngineSettings";
+    // Written by the MSI (installer/Product.wxs) while it is installed.
+    constexpr wchar_t kMsiKey[] = L"SOFTWARE\\WebrtcAudioEngineSetup";
 
     std::wstring Known(REFKNOWNFOLDERID id)
     {
@@ -468,7 +470,13 @@ namespace setup
             SetString(k, kRunName, Quoted(exe) + L" /tray");
             RegCloseKey(k);
         }
-        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS)
+        // Installed by the MSI: its "Installed apps" entry removes everything (also this app), so no second one.
+        HKEY msi = nullptr;
+        const bool byMsi = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kMsiKey, 0, KEY_READ, &msi) == ERROR_SUCCESS;
+        if (msi) RegCloseKey(msi);
+        if (byMsi)
+            RegDeleteKeyW(HKEY_LOCAL_MACHINE, kUninstallKey);  // left over from an install without the MSI
+        else if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, kUninstallKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS)
         {
             SetString(k, L"DisplayName", L"WebRTC Audio Engine Settings");
             if (!version.empty()) SetString(k, L"DisplayVersion", version);

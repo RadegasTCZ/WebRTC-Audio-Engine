@@ -75,6 +75,13 @@ target_link_libraries(WebrtcVoiceApo PRIVATE
   ole32 oleaut32 uuid advapi32 propsys
 )
 
+# --- MSI custom actions (installer/Product.wxs, built into an MSI by scripts/Build-Msi.ps1)
+add_library(SetupActions SHARED installer/SetupActions.cpp)
+target_compile_definitions(SetupActions PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(SetupActions PRIVATE /W4 /permissive- /EHsc /guard:cf)
+target_link_options(SetupActions PRIVATE /guard:cf)
+target_link_libraries(SetupActions PRIVATE msi setupapi newdev crypt32 advapi32 shell32 ole32)
+
 # Offline smoke test that drives the APO like audiodg does (no install needed).
 add_executable(ApoHarness tests/ApoHarness.cpp)
 target_compile_definitions(ApoHarness PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
