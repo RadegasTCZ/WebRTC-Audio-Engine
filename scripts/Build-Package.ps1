@@ -19,6 +19,19 @@ foreach ($part in 'component', 'extension') {
     New-Item -ItemType Directory -Force $dst | Out-Null
     Copy-Item (Join-Path $PackageSrc "$part\*.inf") $dst
     if ($part -eq 'component') {
+        # Windows keeps an installed package whose DriverVer did not change ("already exists"), even if the
+        # DLL is new. Stamp the staged INF with today's date and a version that grows with every build:
+        # major.minor from the source INF, then days since 2026-01-01 and 2-second steps since midnight
+        # (each field must stay below 65536).
+        $inf = Join-Path $dst $ComponentInf
+        $text = [IO.File]::ReadAllText($inf)
+        if ($text -notmatch 'DriverVer\s*=\s*[^,\r\n]+,\s*(\d+)\.(\d+)\.\d+\.\d+') { throw "No DriverVer in $inf" }
+        $now = Get-Date
+        $version = '{0}.{1}.{2}.{3}' -f $Matches[1], $Matches[2], [int]($now.Date - [datetime]'2026-01-01').TotalDays,
+                   [int][math]::Floor($now.TimeOfDay.TotalSeconds / 2)
+        $text = $text -replace 'DriverVer\s*=\s*[^\r\n]+', ('DriverVer   = {0},{1}' -f $now.ToString('MM/dd/yyyy', [cultureinfo]::InvariantCulture), $version)
+        [IO.File]::WriteAllText($inf, $text)
+        Write-Host "  component version $version"
         Copy-Item $DllPath $dst
         & $signtool sign /q /sm /s My /sha1 $cert.Thumbprint /fd sha256 (Join-Path $dst 'WebrtcVoiceApo.dll')
         if ($LASTEXITCODE) { throw 'signtool failed on the DLL' }

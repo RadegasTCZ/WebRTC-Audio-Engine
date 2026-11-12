@@ -1,5 +1,7 @@
 // Offline tests for VoiceProcessor (HPF + WebRTC NS chain), no audio engine involved.
 #include "../src/VoiceProcessor.h"
+#include "../src/EchoTimeline.h"
+#include <string>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -543,6 +545,29 @@ int main()
         EXPECT(changes.load() >= 300, "watcher only made %d changes", changes.load());
         EXPECT(AllFinite(y), "non-finite output under concurrent settings changes");
         settings::Publish(Settings{});
+    }
+
+    std::printf("[15] echo timeline: 10 s steps, quiet steps marked, summary over playing steps only\n");
+    {
+        EchoTimeline tl;
+        tl.Reset();
+        // 6 minutes of meters (100 ms each): playing at 30 dB, then 1 min nothing playing, then 40 dB,
+        // with a NaN thrown in; AEC off for the last 10 s (ignored).
+        for (int m = 0; m < 3600; ++m)
+        {
+            const int sec = m / 10;
+            const bool quiet = sec >= 120 && sec < 180;
+            const float erle = m == 50 ? NAN : (sec < 120 ? 30.0f : 40.0f);
+            tl.Add(erle, quiet ? -90.0f : -30.0f, sec < 350);
+        }
+        std::vector<std::string> lines;
+        tl.Report([&](const char* l) { lines.emplace_back(l); });
+        for (const auto& l : lines) std::printf("    %s\n", l.c_str());
+        EXPECT(lines.size() == 3, "expected a summary + 2 timeline lines, got %zu", lines.size());
+        EXPECT(!lines.empty() && lines[0].find("avg 35.9 dB, min 30.0, max 40.0 over 29 of 36 steps") != std::string::npos,
+               "summary wrong: %s", lines.empty() ? "" : lines[0].c_str());
+        EXPECT(lines.size() == 3 && lines[1].rfind("  00:00  30", 0) == 0 && lines[1].find("  .") != std::string::npos,
+               "timeline line wrong: %s", lines.size() > 1 ? lines[1].c_str() : "");
     }
 
     std::printf(g_failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", g_failures);

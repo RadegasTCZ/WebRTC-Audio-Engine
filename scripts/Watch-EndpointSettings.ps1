@@ -5,7 +5,8 @@
   Realtek value a UI toggle writes. Read-only.
 #>
 param(
-    [string]$EndpointId = '{6a6941e8-d926-4682-b736-b36eaec76eec}',
+    # Endpoint GUID, e.g. '{6a6941e8-...}' (see HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture).
+    [Parameter(Mandatory)][string]$EndpointId,
     [string]$OutFile,
     [int]$IntervalMs = 150,
     [int]$Minutes = 30

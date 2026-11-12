@@ -16,7 +16,7 @@ Test-signed, for test machines only.
 - `app/` "WebRTC Audio Engine Settings": settings window + tray flyout with live meters
 - `package/` driver packages (component + extension INF) that register the effect pack
 - `scripts/` build, install and settings scripts
-- `tests/` offline tests (`ProcessorTests`, `ProbeHarness`) and `CaptureTest` (live mic check)
+- `tests/` offline tests (`ProcessorTests`, `ApoHarness`), `CaptureTest` (live mic check) and `PathProbe` (speaker path vs echo reference)
 - `third_party/` SpeexDSP resampler, WebRTC build stubs; upstream WebRTC is fetched by `scripts/Fetch-Upstream.ps1`
 
 Build output, backups, logs and notes live next to this repo (`..\build`, `..\backups`, `..\logs`, `..\docs`), not inside it.
@@ -27,7 +27,7 @@ Build output, backups, logs and notes live next to this repo (`..\build`, `..\ba
 cmake -S . -B ..\build -G "Visual Studio 18 2026" -A x64
 cmake --build ..\build --config Release
 ..\build\Release\ProcessorTests.exe               # offline tests of the processing core
-..\build\Release\ProbeHarness.exe ..\build\Release\WebrtcVoiceApo.dll
+..\build\Release\ApoHarness.exe ..\build\Release\WebrtcVoiceApo.dll
 ```
 
 ## Install (admin PowerShell, test machines with test signing on)
@@ -37,7 +37,7 @@ cmake --build ..\build --config Release
 .\scripts\Install-Package.ps1       # install the effect pack (restarts Windows Audio)
 .\scripts\Install-SettingsApp.ps1   # settings app, Start-menu shortcut, tray icon at sign-in
 .\scripts\Set-VoiceSettings.ps1     # show/change settings from the command line
-.\scripts\Collect-ProbeLog.ps1      # copy + show the effect's log (C:\ProgramData\WebrtcVoiceApo)
+.\scripts\Collect-Log.ps1           # copy + show the effect's log (C:\ProgramData\WebrtcVoiceApo\engine.log)
 ```
 Uninstall: `.\scripts\Uninstall-Package.ps1` and `.\scripts\Install-SettingsApp.ps1 -Uninstall`.
 

@@ -26,6 +26,15 @@ try {
 }
 finally { Start-Audio }
 
+# Remove superseded versions of the component package (the device now uses the new one). No /force:
+# pnputil refuses a package that is still in use.
+$ourNew = (Get-OurDriverPackages | Where-Object { $_.Published -notin $existing.Published -and $_.Original -ieq $ComponentInf }).Published
+if (-not $ourNew) { Write-Host 'No new component package was added (same version already installed?): nothing to clean up.' }
+else { foreach ($old in ($existing | Where-Object { $_.Original -ieq $ComponentInf -and $_.Published -ne $ourNew })) {
+    $o = & pnputil.exe /delete-driver $old.Published 2>&1 | Out-String
+    Write-Host "Old package $($old.Published): $(if ($o -match 'deleted successfully') { 'removed' } else { 'kept (' + (($o -split "`n" | Where-Object { $_ -match '\S' } | Select-Object -Last 1).Trim()) + ')' })"
+} }
+
 Start-Sleep 2
 Write-Host "`n--- result"
 Get-PnpDevice -PresentOnly | Where-Object { $_.HardwareID -contains $SwcHardwareId } |

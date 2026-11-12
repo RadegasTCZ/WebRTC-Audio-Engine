@@ -6,8 +6,8 @@
 namespace
 {
     SRWLOCK g_lock = SRWLOCK_INIT;
-    constexpr wchar_t kLogPath[] = L"C:\\ProgramData\\WebrtcVoiceApo\\probe.log";
-    constexpr wchar_t kOldLogPath[] = L"C:\\ProgramData\\WebrtcVoiceApo\\probe.old.log";
+    constexpr wchar_t kLogPath[] = L"C:\\ProgramData\\WebrtcVoiceApo\\engine.log";
+    constexpr wchar_t kOldLogPath[] = L"C:\\ProgramData\\WebrtcVoiceApo\\engine.old.log";
     constexpr LONGLONG kMaxLogBytes = 2 * 1024 * 1024;  // then rotate: at most ~4 MB on disk
 }
 
@@ -54,7 +54,7 @@ namespace apolog
                                    !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
             if (plainFile && GetFileSizeEx(h, &size) && size.QuadPart > kMaxLogBytes)
             {
-                // Keep one previous log (probe.old.log) and start over.
+                // Keep one previous log (engine.old.log) and start over.
                 CloseHandle(h);
                 MoveFileExW(kLogPath, kOldLogPath, MOVEFILE_REPLACE_EXISTING);
                 h = CreateFileW(kLogPath, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,

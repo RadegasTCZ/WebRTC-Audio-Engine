@@ -1,6 +1,6 @@
 // Offline smoke test: drives the APO like audiodg does, inside a normal process,
 // so crashes show up here instead of killing system audio.
-// Usage: ProbeHarness.exe <path to WebrtcVoiceApo.dll>
+// Usage: ApoHarness.exe <path to WebrtcVoiceApo.dll>
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioenginebaseapo.h>
@@ -38,7 +38,6 @@ struct FakeOuter final : IUnknown
 static int RunOne(GetClassObjectFn getClassObject, REFCLSID clsid, const char* name, UINT32 period, bool aggregated)
 {
     std::printf("--- %s, period %u frames, %s\n", name, period, aggregated ? "AGGREGATED (like audiodg)" : "standalone");
-    const bool isMfx = IsEqualCLSID(clsid, CLSID_WebrtcVoiceApoMFX) != FALSE;
     IClassFactory* factory = nullptr;
     HRESULT hr = getClassObject(clsid, __uuidof(IClassFactory), reinterpret_cast<void**>(&factory));
     if (FAILED(hr)) return Fail("DllGetClassObject", hr);
@@ -120,16 +119,13 @@ static int RunOne(GetClassObjectFn getClassObject, REFCLSID clsid, const char* n
         rt->APOProcess(1, inProps, 1, outProps);
         if (outProp.u32ValidFrameCount != period || outProp.u32BufferFlags != BUFFER_VALID)
             return Fail("frame count / flags wrong", E_FAIL);
-        if (isMfx && std::memcmp(inBuf.data(), outBuf.data(), inBuf.size() * sizeof(float)) != 0)
-            return Fail("MFX probe must pass through bit-exact", E_FAIL);
         for (float v : outBuf)
             if (!std::isfinite(v)) return Fail("non-finite output", E_FAIL);
     }
     inProp.u32BufferFlags = BUFFER_SILENT;
     rt->APOProcess(1, inProps, 1, outProps);
-    // MFX propagates SILENT; EFX with NS active outputs VALID (its FIFO keeps running).
-    if (isMfx ? outProp.u32BufferFlags != BUFFER_SILENT
-              : (outProp.u32BufferFlags != BUFFER_SILENT && outProp.u32BufferFlags != BUFFER_VALID))
+    // With processing active the output stays VALID (the latency FIFO keeps running).
+    if (outProp.u32BufferFlags != BUFFER_SILENT && outProp.u32BufferFlags != BUFFER_VALID)
         return Fail("silent buffer handling", E_FAIL);
 
     // In-place case (same buffer for input and output).
@@ -151,13 +147,13 @@ static int RunOne(GetClassObjectFn getClassObject, REFCLSID clsid, const char* n
         if (outer.refs != 1) return Fail("outer refcount not balanced", E_FAIL);
         left = outer.inner->Release();  // the engine releases the inner object last
     }
-    std::printf("OK: %u blocks %s, final refcount %lu\n", blocks + 2, isMfx ? "passed through bit-exact" : "processed, all finite", left);
+    std::printf("OK: %u blocks %s, final refcount %lu\n", blocks + 2, "processed, all finite", left);
     return left == 0 ? 0 : Fail("refcount leak", E_FAIL);
 }
 
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc < 2) { std::printf("usage: ProbeHarness <WebrtcVoiceApo.dll>\n"); return 2; }
+    if (argc < 2) { std::printf("usage: ApoHarness <WebrtcVoiceApo.dll>\n"); return 2; }
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     HMODULE dll = LoadLibraryW(argv[1]);
     if (!dll) return Fail("LoadLibrary", HRESULT_FROM_WIN32(GetLastError()));
@@ -168,8 +164,6 @@ int wmain(int argc, wchar_t** argv)
     for (bool aggregated : {true, false})
         for (UINT32 period : {480u, 441u, 128u})
         {
-            rc |= RunOne(getClassObject, CLSID_WebrtcVoiceApoMFX, "MFX", period, aggregated);
-            rc |= RunOne(getClassObject, CLSID_WebrtcVoiceApoEFX, "EFX", period, aggregated);
             rc |= RunOne(getClassObject, CLSID_WebrtcAudioEnginePack, "PACK", period, aggregated);
         }
     using CanUnloadFn = HRESULT(STDAPICALLTYPE*)();

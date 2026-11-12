@@ -1,4 +1,4 @@
-#include "ProbeApo.h"
+#include "EngineApo.h"
 #include "Guids.h"
 #include "Log.h"
 #include "Telemetry.h"
@@ -16,16 +16,12 @@
 
 namespace { void ForgetFxEvents(const void* owner) noexcept; }
 
-std::atomic<long> CProbeApo::s_liveObjects{0};
-std::atomic<long> CProbeApo::s_nextInstance{0};
+std::atomic<long> CEngineApo::s_liveObjects{0};
+std::atomic<long> CEngineApo::s_nextInstance{0};
 
 namespace
 {
 #pragma warning(disable : 4815) // CRegAPOProperties<1> has a zero-length IID array by design
-    CRegAPOProperties<1> g_regMfx(CLSID_WebrtcVoiceApoMFX, L"WebRTC Voice Probe (MFX)", L"Copyright (c) RadegasTCZ",
-                                  1, 0, __uuidof(IAudioProcessingObject), APO_FLAG_DEFAULT);
-    CRegAPOProperties<1> g_regEfx(CLSID_WebrtcVoiceApoEFX, L"WebRTC Voice Probe (EFX)", L"Copyright (c) RadegasTCZ",
-                                  1, 0, __uuidof(IAudioProcessingObject), APO_FLAG_DEFAULT);
     CRegAPOProperties<1> g_regPack(CLSID_WebrtcAudioEnginePack, L"WebRTC Audio Engine", L"Copyright (c) RadegasTCZ",
                                    1, 0, __uuidof(IAudioProcessingObject), APO_FLAG_DEFAULT);
 
@@ -47,11 +43,8 @@ namespace
     }
 }
 
-CProbeApo::CProbeApo(ApoSlot slot, IUnknown* outer) noexcept
-    : CBaseAudioProcessingObject(slot == ApoSlot::MFX   ? &g_regMfx.m_Properties
-                                 : slot == ApoSlot::EFX ? &g_regEfx.m_Properties
-                                                        : &g_regPack.m_Properties),
-      m_slot(slot),
+CEngineApo::CEngineApo(IUnknown* outer) noexcept
+    : CBaseAudioProcessingObject(&g_regPack.m_Properties),
       m_instanceId(++s_nextInstance)
 {
     m_inner.self = this;
@@ -62,7 +55,7 @@ CProbeApo::CProbeApo(ApoSlot slot, IUnknown* outer) noexcept
     apolog::Write(L"[%s #%ld] created in host %s (aggregated=%d)", SlotName(), m_instanceId, exe, outer ? 1 : 0);
 }
 
-CProbeApo::~CProbeApo()
+CEngineApo::~CEngineApo()
 {
     ForgetFxEvents(this);
     if (m_device)
@@ -73,11 +66,11 @@ CProbeApo::~CProbeApo()
 
 // ---------------------------------------------------------------- IUnknown
 
-STDMETHODIMP CProbeApo::QueryInterface(REFIID riid, void** ppv) { return m_outer->QueryInterface(riid, ppv); }
-STDMETHODIMP_(ULONG) CProbeApo::AddRef() { return m_outer->AddRef(); }
-STDMETHODIMP_(ULONG) CProbeApo::Release() { return m_outer->Release(); }
+STDMETHODIMP CEngineApo::QueryInterface(REFIID riid, void** ppv) { return m_outer->QueryInterface(riid, ppv); }
+STDMETHODIMP_(ULONG) CEngineApo::AddRef() { return m_outer->AddRef(); }
+STDMETHODIMP_(ULONG) CEngineApo::Release() { return m_outer->Release(); }
 
-HRESULT CProbeApo::NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcept
+HRESULT CEngineApo::NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcept
 {
     if (!ppv)
         return E_POINTER;
@@ -105,9 +98,9 @@ HRESULT CProbeApo::NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcept
         *ppv = static_cast<IApoAuxiliaryInputConfiguration*>(this);
     else if (riid == __uuidof(IApoAuxiliaryInputRT) && IsAecCandidate())
         *ppv = static_cast<IApoAuxiliaryInputRT*>(this);
-    else if (riid == __uuidof(IAudioSystemEffects3) && m_slot == ApoSlot::Pack)
+    else if (riid == __uuidof(IAudioSystemEffects3))
         *ppv = static_cast<IAudioSystemEffects3*>(this);
-    else if (riid == __uuidof(IAudioProcessingObjectNotifications) && m_slot == ApoSlot::Pack)
+    else if (riid == __uuidof(IAudioProcessingObjectNotifications))
         *ppv = static_cast<IAudioProcessingObjectNotifications*>(this);
     else
     {
@@ -123,7 +116,7 @@ HRESULT CProbeApo::NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcept
 
 // ---------------------------------------------------------------- Initialize
 
-STDMETHODIMP CProbeApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
+STDMETHODIMP CEngineApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
 {
     if (cbDataSize > 0 && !pbyData)
         return E_POINTER;
@@ -222,7 +215,7 @@ STDMETHODIMP CProbeApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
     return S_OK;
 }
 
-STDMETHODIMP CProbeApo::GetLatency(HNSTIME* pTime)
+STDMETHODIMP CEngineApo::GetLatency(HNSTIME* pTime)
 {
     if (!pTime)
         return E_POINTER;
@@ -249,7 +242,7 @@ namespace
     }
 }
 
-STDMETHODIMP CProbeApo::IsInputFormatSupported(IAudioMediaType* pOppositeFormat, IAudioMediaType* pRequestedInputFormat,
+STDMETHODIMP CEngineApo::IsInputFormatSupported(IAudioMediaType* pOppositeFormat, IAudioMediaType* pRequestedInputFormat,
                                                IAudioMediaType** ppSupportedInputFormat)
 {
     HRESULT hr = CBaseAudioProcessingObject::IsInputFormatSupported(pOppositeFormat, pRequestedInputFormat, ppSupportedInputFormat);
@@ -262,7 +255,7 @@ STDMETHODIMP CProbeApo::IsInputFormatSupported(IAudioMediaType* pOppositeFormat,
     return hr;
 }
 
-STDMETHODIMP CProbeApo::IsOutputFormatSupported(IAudioMediaType* pOppositeFormat, IAudioMediaType* pRequestedOutputFormat,
+STDMETHODIMP CEngineApo::IsOutputFormatSupported(IAudioMediaType* pOppositeFormat, IAudioMediaType* pRequestedOutputFormat,
                                                 IAudioMediaType** ppSupportedOutputFormat)
 {
     HRESULT hr = CBaseAudioProcessingObject::IsOutputFormatSupported(pOppositeFormat, pRequestedOutputFormat, ppSupportedOutputFormat);
@@ -277,7 +270,7 @@ STDMETHODIMP CProbeApo::IsOutputFormatSupported(IAudioMediaType* pOppositeFormat
 
 // ---------------------------------------------------------------- Lock / Unlock
 
-void CProbeApo::ResetStats() noexcept
+void CEngineApo::ResetStats() noexcept
 {
     m_processCalls = m_validFrames = m_silentCalls = 0;
     m_minPeriod = 0xFFFFFFFF;
@@ -285,7 +278,7 @@ void CProbeApo::ResetStats() noexcept
     m_peak = 0.0f;
 }
 
-STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNECTION_DESCRIPTOR** ppInputConnections,
+STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNECTION_DESCRIPTOR** ppInputConnections,
                                        UINT32 u32NumOutputConnections, APO_CONNECTION_DESCRIPTOR** ppOutputConnections)
 {
     HRESULT hr = CBaseAudioProcessingObject::LockForProcess(u32NumInputConnections, ppInputConnections,
@@ -304,11 +297,11 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
     m_bytesPerFrame = fmt.dwSamplesPerFrame * fmt.dwBytesPerSampleContainer;
     m_isFloat32 = IsEqualGUID(fmt.guidFormatType, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) && fmt.dwBytesPerSampleContainer == 4;
     ResetStats();
+    m_echoTimeline.Reset();
     m_lockTick = GetTickCount64();
 
-    // Voice processing runs in the EFX and in the effect pack; the plain MFX stays a pure probe.
     m_proc.Deactivate();
-    if (m_slot == ApoSlot::Pack && m_device)
+    if (m_device)
     {
         // Starting slider position (notifications only arrive on changes).
         IAudioEndpointVolume* ev = nullptr;
@@ -324,8 +317,8 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
         apolog::Write(L"[%s #%ld] initial slider: hr=0x%08X %.2f dB, hwVolumeBus=%d", SlotName(), m_instanceId, hrv, db,
                       m_hardwareVolumeBus ? 1 : 0);
     }
-    if (m_slot != ApoSlot::MFX)
     {
+        // Voice processing (only float32 formats; anything else passes through untouched).
         settings::EnsureWatcher();  // live settings (non-RT here)
         m_devIdx = settings::RegisterDevice(m_deviceGuid);  // this microphone's settings (defaults or its own)
         m_proc.SetSettingsIndex(m_devIdx);
@@ -338,7 +331,7 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
             const UINT32 maxFrames = std::max(u32NumInputConnections ? ppInputConnections[0]->u32MaxFrameCount : 0u,
                                               u32NumOutputConnections ? ppOutputConnections[0]->u32MaxFrameCount : 0u);
             m_proc.SetReference(m_refActive.load() ? &m_ref : nullptr);  // echo reference attached by AddAuxiliaryInput
-            if (m_slot == ApoSlot::Pack && !m_telemetry)
+            if (!m_telemetry)
                 m_telemetry = telemetry::ClaimSlot(m_endpointKey, m_endpointName, m_deviceGuid);  // per-device meters for the tray app (non-RT)
             ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(std::lround(fmt.fFramesPerSecond)), s,
                                 static_cast<int>(maxFrames ? maxFrames : 4096));
@@ -360,13 +353,15 @@ STDMETHODIMP CProbeApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNEC
     return S_OK;
 }
 
-STDMETHODIMP CProbeApo::UnlockForProcess()
+STDMETHODIMP CEngineApo::UnlockForProcess()
 {
     const double seconds = (GetTickCount64() - m_lockTick) / 1000.0;
     if (m_refActive.load())
         apolog::Write(L"[%s #%ld] echo reference: calls=%llu frames=%llu (%.1f s) silentCalls=%llu dropped=%llu, AEC3 %s, reference underruns=%llu", SlotName(),
                       m_instanceId, m_refCalls.load(), m_refFrames.load(), m_refFrames.load() / 48000.0, m_refSilentCalls.load(), m_refDropped.load(),
                       m_proc.HasAec() ? L"running" : L"not running", m_proc.ReferenceUnderruns());
+    if (m_proc.HasAec() && m_echoTimeline.HasData())
+        m_echoTimeline.Report([this](const char* line) { apolog::Write(L"[%s #%ld] %hs", SlotName(), m_instanceId, line); });
     const double peakDb = m_peak > 0.0f ? 20.0 * std::log10(static_cast<double>(m_peak)) : -999.0;
     apolog::Write(L"[%s #%ld] UnlockForProcess mode=%s after %.1f s: calls=%llu validFrames=%llu silentCalls=%llu period=%u..%u frames peak=%.1f dBFS underruns=%llu",
                   SlotName(), m_instanceId, ModeName(m_mode), seconds, m_processCalls, m_validFrames, m_silentCalls,
@@ -377,7 +372,7 @@ STDMETHODIMP CProbeApo::UnlockForProcess()
 // ---------------------------------------------------------------- Real-time processing
 // Rules: no allocation, no locks, no logging, no waiting.
 
-STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** ppInputConnections,
+STDMETHODIMP_(void) CEngineApo::APOProcess(UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** ppInputConnections,
                                           UINT32 u32NumOutputConnections, APO_CONNECTION_PROPERTY** ppOutputConnections)
 {
     if (u32NumInputConnections == 0 || u32NumOutputConnections == 0)
@@ -406,14 +401,18 @@ STDMETHODIMP_(void) CProbeApo::APOProcess(UINT32 u32NumInputConnections, APO_CON
             ++m_silentCalls;
         }
         VoiceProcessor::Meters mt;
-        if (m_telemetry && m_proc.TakeMeters(mt))
+        if (m_proc.TakeMeters(mt))  // every 100 ms
         {
-            telemetry::Values d{};
-            d.inputDbfs = mt.inputDbfs; d.outputDbfs = mt.outputDbfs; d.referenceDbfs = mt.referenceDbfs;
-            d.echoRemovedDb = mt.echoRemovedDb; d.agcGainDb = mt.agcGainDb; d.limiterDb = mt.limiterDb;
-            d.aecRunning = mt.aecRunning ? 1u : 0u;
-            d.sampleRate = static_cast<uint32_t>(m_proc.SampleRate());
-            telemetry::Publish(m_telemetry, d);
+            m_echoTimeline.Add(mt.echoRemovedDb, mt.referenceDbfs, mt.aecRunning);
+            if (m_telemetry)
+            {
+                telemetry::Values d{};
+                d.inputDbfs = mt.inputDbfs; d.outputDbfs = mt.outputDbfs; d.referenceDbfs = mt.referenceDbfs;
+                d.echoRemovedDb = mt.echoRemovedDb; d.agcGainDb = mt.agcGainDb; d.limiterDb = mt.limiterDb;
+                d.aecRunning = mt.aecRunning ? 1u : 0u;
+                d.sampleRate = static_cast<uint32_t>(m_proc.SampleRate());
+                telemetry::Publish(m_telemetry, d);
+            }
         }
         float peak = m_peak;
         const size_t n = static_cast<size_t>(frames) * m_channels;
@@ -467,15 +466,14 @@ namespace
     constexpr GUID kModeSpeech = {0xFC1CFC9B, 0xB9D6, 0x4CFA, {0xB5, 0xE0, 0x4B, 0xB2, 0x16, 0x68, 0x78, 0xB2}};
 }
 
-bool CProbeApo::IsAecCandidate() const noexcept
+bool CEngineApo::IsAecCandidate() const noexcept
 {
     // An AEC APO must be a capture mode effect. Microsoft's AecApo sample only accepts COMMUNICATIONS;
     // the owner wants AEC for DEFAULT (most apps) and SPEECH too. RAW streams skip mode effects anyway.
-    return m_slot == ApoSlot::Pack &&
-           (IsEqualGUID(m_mode, kModeCommunications) || IsEqualGUID(m_mode, kModeDefault) || IsEqualGUID(m_mode, kModeSpeech));
+    return (IsEqualGUID(m_mode, kModeCommunications) || IsEqualGUID(m_mode, kModeDefault) || IsEqualGUID(m_mode, kModeSpeech));
 }
 
-STDMETHODIMP CProbeApo::GetDesiredReferenceStreamProperties(APO_REFERENCE_STREAM_PROPERTIES* pProperties)
+STDMETHODIMP CEngineApo::GetDesiredReferenceStreamProperties(APO_REFERENCE_STREAM_PROPERTIES* pProperties)
 {
     if (!pProperties)
         return E_POINTER;
@@ -485,7 +483,7 @@ STDMETHODIMP CProbeApo::GetDesiredReferenceStreamProperties(APO_REFERENCE_STREAM
     return S_OK;
 }
 
-STDMETHODIMP CProbeApo::IsInputFormatSupported(IAudioMediaType* pRequested, IAudioMediaType** ppSupported)
+STDMETHODIMP CEngineApo::IsInputFormatSupported(IAudioMediaType* pRequested, IAudioMediaType** ppSupported)
 {
     // Aux (reference) input: we want 48 kHz float32, any channel count (we downmix to mono).
     if (!pRequested || !ppSupported)
@@ -521,7 +519,7 @@ STDMETHODIMP CProbeApo::IsInputFormatSupported(IAudioMediaType* pRequested, IAud
     return hr;
 }
 
-STDMETHODIMP CProbeApo::AddAuxiliaryInput(DWORD dwInputId, UINT32 cbDataSize, BYTE* pbyData, APO_CONNECTION_DESCRIPTOR* pInputConnection)
+STDMETHODIMP CEngineApo::AddAuxiliaryInput(DWORD dwInputId, UINT32 cbDataSize, BYTE* pbyData, APO_CONNECTION_DESCRIPTOR* pInputConnection)
 {
     if (!pInputConnection || !pInputConnection->pFormat)
         return E_INVALIDARG;
@@ -560,7 +558,7 @@ STDMETHODIMP CProbeApo::AddAuxiliaryInput(DWORD dwInputId, UINT32 cbDataSize, BY
     return S_OK;
 }
 
-STDMETHODIMP CProbeApo::RemoveAuxiliaryInput(DWORD dwInputId)
+STDMETHODIMP CEngineApo::RemoveAuxiliaryInput(DWORD dwInputId)
 {
     if (!m_refActive.load() || dwInputId != m_refInputId)
         return E_INVALIDARG;
@@ -570,7 +568,7 @@ STDMETHODIMP CProbeApo::RemoveAuxiliaryInput(DWORD dwInputId)
     return S_OK;
 }
 
-STDMETHODIMP_(void) CProbeApo::AcceptInput(DWORD dwInputId, const APO_CONNECTION_PROPERTY* p)
+STDMETHODIMP_(void) CEngineApo::AcceptInput(DWORD dwInputId, const APO_CONNECTION_PROPERTY* p)
 {
     // Real-time: no allocation, no locks, no logging.
     if (!p || !m_refActive.load(std::memory_order_acquire) || dwInputId != m_refInputId)
@@ -645,7 +643,7 @@ void SignalSystemEffectsChanged() noexcept
     ReleaseSRWLockShared(&g_fxEventsLock);
 }
 
-STDMETHODIMP CProbeApo::GetControllableSystemEffectsList(AUDIO_SYSTEMEFFECT** effects, UINT* numEffects, HANDLE event)
+STDMETHODIMP CEngineApo::GetControllableSystemEffectsList(AUDIO_SYSTEMEFFECT** effects, UINT* numEffects, HANDLE event)
 {
     if (!effects || !numEffects)
         return E_POINTER;
@@ -684,7 +682,7 @@ STDMETHODIMP CProbeApo::GetControllableSystemEffectsList(AUDIO_SYSTEMEFFECT** ef
     return S_OK;
 }
 
-STDMETHODIMP CProbeApo::SetAudioSystemEffectState(GUID effectId, AUDIO_SYSTEMEFFECT_STATE state)
+STDMETHODIMP CEngineApo::SetAudioSystemEffectState(GUID effectId, AUDIO_SYSTEMEFFECT_STATE state)
 {
     // Changes this microphone's own settings if it has custom ones, otherwise the defaults.
     const wchar_t* scope = Settings::IsDeviceCustom(m_deviceGuid) ? m_deviceGuid : nullptr;
@@ -704,17 +702,15 @@ STDMETHODIMP CProbeApo::SetAudioSystemEffectState(GUID effectId, AUDIO_SYSTEMEFF
 
 // ---------------------------------------------------------------- Mic volume slider (notifications)
 
-float CProbeApo::SliderGainDb(const Settings& s) const noexcept
+float CEngineApo::SliderGainDb(const Settings& s) const noexcept
 {
-    if (m_slot != ApoSlot::Pack)   // in the OEM chain the OEM applies the slider itself
-        return 0.0f;
     if (s.agcEnabled)              // AGC2 owns the level: the slider is ignored (owner's request)
         return 0.0f;
     const bool apply = s.gainMode == 1 || (s.gainMode == 0 && !m_hardwareVolumeBus);
     return apply ? m_sliderDb.load(std::memory_order_relaxed) : 0.0f;
 }
 
-STDMETHODIMP CProbeApo::GetApoNotificationRegistrationInfo(APO_NOTIFICATION_DESCRIPTOR** apoNotifications, DWORD* count)
+STDMETHODIMP CEngineApo::GetApoNotificationRegistrationInfo(APO_NOTIFICATION_DESCRIPTOR** apoNotifications, DWORD* count)
 {
     if (!apoNotifications || !count)
         return E_POINTER;
@@ -735,7 +731,7 @@ STDMETHODIMP CProbeApo::GetApoNotificationRegistrationInfo(APO_NOTIFICATION_DESC
     return S_OK;
 }
 
-STDMETHODIMP_(void) CProbeApo::HandleNotification(APO_NOTIFICATION* n)
+STDMETHODIMP_(void) CEngineApo::HandleNotification(APO_NOTIFICATION* n)
 {
     if (!n)
         return;
@@ -756,11 +752,11 @@ STDMETHODIMP_(void) CProbeApo::HandleNotification(APO_NOTIFICATION* n)
 
 // ---------------------------------------------------------------- IAudioSystemEffects2
 
-STDMETHODIMP CProbeApo::GetEffectsList(LPGUID* ppEffectsIds, UINT* pcEffects, HANDLE /*Event*/)
+STDMETHODIMP CEngineApo::GetEffectsList(LPGUID* ppEffectsIds, UINT* pcEffects, HANDLE /*Event*/)
 {
     if (!ppEffectsIds || !pcEffects)
         return E_POINTER;
-    *ppEffectsIds = nullptr;  // the probe advertises no user-visible effects
+    *ppEffectsIds = nullptr;  // controllable effects are reported through IAudioSystemEffects3
     *pcEffects = 0;
     return S_OK;
 }

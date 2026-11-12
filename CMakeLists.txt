@@ -29,6 +29,7 @@ add_library(voice_core STATIC
   src/AgcStage.h
   src/AecConfig.h
   src/ReferenceRing.h
+  src/EchoTimeline.h
 )
 target_include_directories(voice_core PUBLIC third_party/speexdsp)
 set_source_files_properties(third_party/speexdsp/resample.c PROPERTIES COMPILE_OPTIONS "/W0")
@@ -44,8 +45,8 @@ target_link_options(WebrtcAudioEngineSettings PRIVATE /guard:cf)
 
 add_library(WebrtcVoiceApo SHARED
   src/DllMain.cpp
-  src/ProbeApo.cpp
-  src/ProbeApo.h
+  src/EngineApo.cpp
+  src/EngineApo.h
   src/Guids.h
   src/WebrtcVoiceApo.def
 )
@@ -64,10 +65,10 @@ target_link_libraries(WebrtcVoiceApo PRIVATE
 )
 
 # Offline smoke test that drives the APO like audiodg does (no install needed).
-add_executable(ProbeHarness tests/ProbeHarness.cpp)
-target_compile_definitions(ProbeHarness PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(ProbeHarness PRIVATE audiomediatypecrt ole32 uuid)
-add_dependencies(ProbeHarness WebrtcVoiceApo)
+add_executable(ApoHarness tests/ApoHarness.cpp)
+target_compile_definitions(ApoHarness PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(ApoHarness PRIVATE audiomediatypecrt ole32 uuid)
+add_dependencies(ApoHarness WebrtcVoiceApo)
 
 # Offline tests of the processing core.
 add_executable(ProcessorTests tests/ProcessorTests.cpp)

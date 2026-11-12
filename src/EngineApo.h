@@ -8,25 +8,25 @@
 #include "VoiceProcessor.h"
 #include "ReferenceRing.h"
 #include "Telemetry.h"
-
-// MFX = bit-exact probe; EFX = NS appended to the OEM endpoint chain; Pack = NS as our own effect pack.
-enum class ApoSlot { MFX, EFX, Pack };
+#include "EchoTimeline.h"
 
 // Signals Windows (Settings > Audio enhancements) that our controllable effect states changed.
 void SignalSystemEffectsChanged() noexcept;
 
 
-// Milestone 1, step 1: pass-through probe.
-// Audio is copied through untouched. Non-real-time callbacks log what the audio engine
-// tells us (slot, processing mode, endpoint, format); APOProcess only updates counters.
-class CProbeApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects3, public IAudioProcessingObjectNotifications,
+// The "WebRTC Audio Engine" effect pack APO: a capture mode effect (DEFAULT / COMMUNICATIONS / SPEECH)
+// running VoiceProcessor (cleanup filters, AEC3 with the render loopback as auxiliary input, NS, AGC2,
+// limiter). It also applies the mic volume slider in software, reports AEC/NS/AGC as controllable system
+// effects, and publishes live meters for the settings app. Non-real-time callbacks log what the audio
+// engine tells us (mode, endpoint, format) to C:\ProgramData\WebrtcVoiceApo\engine.log.
+class CEngineApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects3, public IAudioProcessingObjectNotifications,
                         public IApoAcousticEchoCancellation2, public IApoAuxiliaryInputConfiguration, public IApoAuxiliaryInputRT
 {
 public:
     // The audio engine creates APOs AGGREGATED (pUnkOuter != null), so we implement the
     // standard COM aggregation pattern: an inner non-delegating IUnknown that owns the
     // lifetime, while the IUnknown methods on our interfaces delegate to the outer object.
-    CProbeApo(ApoSlot slot, IUnknown* outer) noexcept;
+    explicit CEngineApo(IUnknown* outer) noexcept;
     IUnknown* NonDelegatingUnknown() noexcept { return &m_inner; }
 
     // IUnknown (delegating)
@@ -78,7 +78,7 @@ public:
 private:
     struct InnerUnknown final : IUnknown
     {
-        CProbeApo* self;
+        CEngineApo* self;
         STDMETHOD(QueryInterface)(REFIID riid, void** ppv) override { return self->NonDelegatingQueryInterface(riid, ppv); }
         STDMETHOD_(ULONG, AddRef)() override { return ++self->m_refs; }
         STDMETHOD_(ULONG, Release)() override
@@ -90,15 +90,14 @@ private:
         }
     };
 
-    ~CProbeApo() override;
+    ~CEngineApo() override;
     HRESULT NonDelegatingQueryInterface(REFIID riid, void** ppv) noexcept;
-    const wchar_t* SlotName() const noexcept { return m_slot == ApoSlot::MFX ? L"MFX" : m_slot == ApoSlot::EFX ? L"EFX" : L"PACK"; }
+    static constexpr const wchar_t* SlotName() noexcept { return L"PACK"; }  // log tag
     void ResetStats() noexcept;
 
     InnerUnknown m_inner;
     IUnknown* m_outer;  // the aggregating object, or &m_inner when not aggregated
     std::atomic<ULONG> m_refs{1};
-    const ApoSlot m_slot;
     const long m_instanceId;
     GUID m_mode{};
 
@@ -115,6 +114,7 @@ private:
     // Echo reference (render loopback) from the auxiliary input, downmixed to mono.
     bool IsAecCandidate() const noexcept;   // Pack slot + COMMUNICATIONS mode
     ReferenceRing m_ref;
+    EchoTimeline m_echoTimeline;        // echo removed per 10 s, written to the log when the stream stops
     std::atomic<bool> m_refActive{false};
     DWORD m_refInputId = 0;
     UINT32 m_refChannels = 0;

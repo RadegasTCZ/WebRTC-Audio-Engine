@@ -1,4 +1,4 @@
-#include "ProbeApo.h"
+#include "EngineApo.h"
 #include "Guids.h"
 #include "Log.h"
 #include "Settings.h"
@@ -11,7 +11,6 @@ namespace
     class ClassFactory final : public IClassFactory
     {
     public:
-        explicit ClassFactory(ApoSlot slot) noexcept : m_slot(slot) {}
 
         STDMETHOD(QueryInterface)(REFIID riid, void** ppv) override
         {
@@ -39,7 +38,7 @@ namespace
             if (outer && riid != __uuidof(IUnknown))
                 return CLASS_E_NOAGGREGATION;
 
-            CProbeApo* apo = new (std::nothrow) CProbeApo(m_slot, outer);
+            CEngineApo* apo = new (std::nothrow) CEngineApo(outer);
             if (!apo)
                 return E_OUTOFMEMORY;
             IUnknown* inner = apo->NonDelegatingUnknown();
@@ -52,14 +51,9 @@ namespace
             lock ? ++g_serverLocks : --g_serverLocks;
             return S_OK;
         }
-
-    private:
-        const ApoSlot m_slot;
     };
 
-    ClassFactory g_factoryMfx(ApoSlot::MFX);
-    ClassFactory g_factoryEfx(ApoSlot::EFX);
-    ClassFactory g_factoryPack(ApoSlot::Pack);
+    ClassFactory g_factoryPack;
 }
 
 extern void (*g_afterSettingsChanged)() noexcept;
@@ -79,10 +73,6 @@ _Check_return_ STDAPI DllGetClassObject(_In_ REFCLSID rclsid, _In_ REFIID riid, 
     if (!ppv)
         return E_POINTER;
     *ppv = nullptr;
-    if (rclsid == CLSID_WebrtcVoiceApoMFX)
-        return g_factoryMfx.QueryInterface(riid, ppv);
-    if (rclsid == CLSID_WebrtcVoiceApoEFX)
-        return g_factoryEfx.QueryInterface(riid, ppv);
     if (rclsid == CLSID_WebrtcAudioEnginePack)
         return g_factoryPack.QueryInterface(riid, ppv);
     return CLASS_E_CLASSNOTAVAILABLE;
@@ -91,5 +81,5 @@ _Check_return_ STDAPI DllGetClassObject(_In_ REFCLSID rclsid, _In_ REFIID riid, 
 __control_entrypoint(DllExport) STDAPI DllCanUnloadNow()
 {
     // The settings watcher (a thread-pool wait) lives for the whole process: never unload once started.
-    return (CProbeApo::LiveObjects() == 0 && g_serverLocks == 0 && !settings::WatcherStarted()) ? S_OK : S_FALSE;
+    return (CEngineApo::LiveObjects() == 0 && g_serverLocks == 0 && !settings::WatcherStarted()) ? S_OK : S_FALSE;
 }

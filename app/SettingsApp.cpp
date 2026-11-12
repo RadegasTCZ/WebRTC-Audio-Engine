@@ -294,11 +294,16 @@ namespace
         r = section(L"Output limiter", 52);
         Ctl(L"BUTTON", L"Keep peaks below -1 dBFS", BS_AUTOCHECKBOX, 28, r, 300, 24, IDC_LIM_ON);
 
-        r = section(L"Microphone volume slider", 76);
+        r = section(L"Microphone volume slider", 104);
         Ctl(L"STATIC", L"Apply", SS_LEFT, 28, r + 4, 100, 20, 0);
         Ctl(L"COMBOBOX", nullptr, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 140, r, 228, 200, IDC_GAIN_MODE);
         Combo(IDC_GAIN_MODE, {L"Auto (built-in microphones)", L"Always", L"Never"});
-        Ctl(L"STATIC", L"Ignored while automatic gain is on.", SS_LEFT, 28, r + 30, 340, 20, IDC_GAIN_NOTE);
+        // USB / Bluetooth microphones apply the slider in their own hardware (e.g. a webcam's preamp), before
+        // any effect: AGC cannot switch that off, only even out what arrives.
+        Ctl(L"STATIC",
+            L"Automatic gain sets the level, so the slider is not applied here. USB and Bluetooth microphones "
+            L"still apply it in their own hardware: keep it moderate, so the microphone does not clip.",
+            SS_LEFT, 28, r + 30, 340, 50, IDC_GAIN_NOTE);
 
         Ctl(L"BUTTON", L"Reset to defaults", BS_PUSHBUTTON, 16, y + 4, 150, 26, IDC_DEFAULTS);
         y += 40;
@@ -418,7 +423,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
     g_bold = CreateFontIndirectW(&bold);
 
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT rc{0, 0, S(400), S(690)};
+    RECT rc{0, 0, S(400), S(718)};
     AdjustWindowRectExForDpi(&rc, style, FALSE, 0, g_dpi);
     g_wnd = CreateWindowExW(0, wc.lpszClassName, L"WebRTC Audio Engine Settings", style, CW_USEDEFAULT, CW_USEDEFAULT,
                             rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);
