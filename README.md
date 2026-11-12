@@ -29,6 +29,7 @@ cmake -S . -B ..\build -G "Visual Studio 18 2026" -A x64
 cmake --build ..\build --config Release
 ..\build\Release\ProcessorTests.exe               # offline tests of the processing core
 ..\build\Release\ApoHarness.exe ..\build\Release\WebrtcVoiceApo.dll
+.\scripts\Check-CpuSafety.ps1                     # every AVX instruction is behind a CPU check (runs on any x64 CPU)
 ```
 
 ## Install (admin PowerShell, test machines with test signing on)
