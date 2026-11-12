@@ -141,32 +141,59 @@ namespace
         return false;
     }
 
-    void StopAudio()
+    bool StopService(SC_HANDLE scm, const wchar_t* name)
     {
-        SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-        if (!scm) return;
-        if (SC_HANDLE svc = OpenServiceW(scm, L"Audiosrv", SERVICE_STOP | SERVICE_QUERY_STATUS))
-        {
-            SERVICE_STATUS st{};
-            if (ControlService(svc, SERVICE_CONTROL_STOP, &st) || GetLastError() == ERROR_SERVICE_NOT_ACTIVE)
-                Log(L"Windows Audio %s", WaitState(svc, SERVICE_STOPPED) ? L"stopped" : L"did not stop in 30 s");
-            else
-                Log(L"could not stop Windows Audio (error %lu)", GetLastError());
-            CloseServiceHandle(svc);
-        }
-        CloseServiceHandle(scm);
+        SC_HANDLE svc = OpenServiceW(scm, name, SERVICE_STOP | SERVICE_QUERY_STATUS);
+        if (!svc) return false;
+        SERVICE_STATUS st{};
+        bool ok = ControlService(svc, SERVICE_CONTROL_STOP, &st) || GetLastError() == ERROR_SERVICE_NOT_ACTIVE;
+        if (!ok) Log(L"could not stop %s (error %lu)", name, GetLastError());
+        ok = ok && WaitState(svc, SERVICE_STOPPED);
+        CloseServiceHandle(svc);
+        return ok;
     }
 
-    void StartAudio()
+    // Stops Windows Audio and the running services that depend on it (e.g. Realtek / Dolby / Nahimic services),
+    // like Stop-Service -Force. Returns the dependents, to be started again by StartAudio.
+    std::vector<std::wstring> StopAudio()
+    {
+        std::vector<std::wstring> dependents;
+        SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+        if (!scm) return dependents;
+        if (SC_HANDLE audio = OpenServiceW(scm, L"Audiosrv", SERVICE_ENUMERATE_DEPENDENTS))
+        {
+            DWORD bytes = 0, count = 0;
+            EnumDependentServicesW(audio, SERVICE_ACTIVE, nullptr, 0, &bytes, &count);
+            if (bytes)
+            {
+                std::vector<BYTE> buf(bytes);
+                auto* list = reinterpret_cast<ENUM_SERVICE_STATUSW*>(buf.data());
+                if (EnumDependentServicesW(audio, SERVICE_ACTIVE, list, bytes, &bytes, &count))
+                    for (DWORD i = 0; i < count; ++i)  // in the order they have to be stopped
+                    {
+                        if (StopService(scm, list[i].lpServiceName)) Log(L"stopped %s", list[i].lpServiceName);
+                        dependents.push_back(list[i].lpServiceName);
+                    }
+            }
+            CloseServiceHandle(audio);
+        }
+        Log(L"Windows Audio %s", StopService(scm, L"Audiosrv") ? L"stopped" : L"did not stop");
+        CloseServiceHandle(scm);
+        return dependents;
+    }
+
+    void StartAudio(const std::vector<std::wstring>& dependents)
     {
         SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
         if (!scm) return;
-        for (const wchar_t* name : {L"AudioEndpointBuilder", L"Audiosrv"})
+        std::vector<std::wstring> names = {L"AudioEndpointBuilder", L"Audiosrv"};
+        names.insert(names.end(), dependents.rbegin(), dependents.rend());  // reverse of the stop order
+        for (const auto& name : names)
         {
-            if (SC_HANDLE svc = OpenServiceW(scm, name, SERVICE_START | SERVICE_QUERY_STATUS))
+            if (SC_HANDLE svc = OpenServiceW(scm, name.c_str(), SERVICE_START | SERVICE_QUERY_STATUS))
             {
                 if (!StartServiceW(svc, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING)
-                    Log(L"could not start %s (error %lu)", name, GetLastError());
+                    Log(L"could not start %s (error %lu)", name.c_str(), GetLastError());
                 else
                     WaitState(svc, SERVICE_RUNNING);
                 CloseServiceHandle(svc);
@@ -360,7 +387,7 @@ namespace
 
         const std::vector<OemInf> before = OurPackages();
         UINT result = ERROR_SUCCESS;
-        StopAudio();
+        const std::vector<std::wstring> dependents = StopAudio();
         for (size_t i = 0; i < std::size(kInfs); ++i)
         {
             const std::wstring inf = driverDir + kInfDirs[i] + L"\\" + kInfs[i];
@@ -377,7 +404,7 @@ namespace
                 break;
             }
         }
-        StartAudio();
+        StartAudio(dependents);
         if (result != ERROR_SUCCESS) return result;
 
         // Remove superseded versions (e.g. from an older script install). No force: a package still in use stays.
@@ -451,7 +478,7 @@ namespace
         const std::wstring driverDir = CustomActionData();
         const std::wstring infDir = WindowsDir() + L"\\INF\\";
         std::vector<OemInf> packages = OurPackages();
-        StopAudio();
+        const std::vector<std::wstring> dependents = StopAudio();
         // Extension first (it stops re-creating the software devices), then the components.
         for (const wchar_t* inf : {kInfs[2], kInfs[0], kInfs[1]})
         {
@@ -467,7 +494,7 @@ namespace
             }
         }
         RemoveOurDevices();
-        StartAudio();
+        StartAudio(dependents);
         RemoveSettingsApp();
         if (!driverDir.empty()) UntrustCertificate(driverDir);
         return ERROR_SUCCESS;  // best effort: never block removing the product
