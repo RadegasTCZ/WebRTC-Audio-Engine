@@ -68,10 +68,11 @@ namespace ui
     }
 
     // Renders a signed-distance shape into a premultiplied 32-bit bitmap and blends it onto `dc`.
+    // `dist` takes coordinates relative to r; only the part `sub` (also relative to r) is rendered.
     template <class Distance>
-    void BlendShape(HDC dc, const RECT& r, COLORREF c, Distance dist)
+    void BlendShape(HDC dc, const RECT& r, COLORREF c, Distance dist, RECT sub)
     {
-        const int w = r.right - r.left, h = r.bottom - r.top;
+        const int w = sub.right - sub.left, h = sub.bottom - sub.top;
         if (w <= 0 || h <= 0) return;
         BITMAPINFO bi{};
         bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB};
@@ -87,30 +88,54 @@ namespace ui
         for (int y = 0; y < h; ++y)
             for (int x = 0; x < w; ++x)
             {
-                const float a = std::clamp(0.5f - dist(x + 0.5f, y + 0.5f), 0.0f, 1.0f);
+                const float a = std::clamp(0.5f - dist(sub.left + x + 0.5f, sub.top + y + 0.5f), 0.0f, 1.0f);
                 const uint32_t A = static_cast<uint32_t>(a * 255.0f + 0.5f);
                 px[y * w + x] = (A << 24) | ((cr * A / 255) << 16) | ((cg * A / 255) << 8) | (cb * A / 255);
             }
         HDC mem = CreateCompatibleDC(dc);
         auto old = SelectObject(mem, bmp);
         BLENDFUNCTION bf{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-        AlphaBlend(dc, r.left, r.top, w, h, mem, 0, 0, w, h, bf);
+        AlphaBlend(dc, r.left + sub.left, r.top + sub.top, w, h, mem, 0, 0, w, h, bf);
         SelectObject(mem, old);
         DeleteDC(mem);
         DeleteObject(bmp);
     }
+    template <class Distance>
+    void BlendShape(HDC dc, const RECT& r, COLORREF c, Distance dist)
+    {
+        BlendShape(dc, r, c, dist, RECT{0, 0, r.right - r.left, r.bottom - r.top});
+    }
 
     void FillRound(HDC dc, const RECT& r, int radius, COLORREF c, float stroke)
     {
-        const float w = static_cast<float>(r.right - r.left), h = static_cast<float>(r.bottom - r.top);
+        const int iw = r.right - r.left, ih = r.bottom - r.top;
+        const float w = static_cast<float>(iw), h = static_cast<float>(ih);
         const float rad = std::min({static_cast<float>(radius), w / 2, h / 2});
-        BlendShape(dc, r, c, [&](float x, float y) {
+        auto dist = [&](float x, float y) {
             const float qx = std::max(std::abs(x - w / 2) - (w / 2 - rad), 0.0f);
             const float qy = std::max(std::abs(y - h / 2) - (h / 2 - rad), 0.0f);
             const float inside = std::min(std::max(std::abs(x - w / 2) - (w / 2 - rad), std::abs(y - h / 2) - (h / 2 - rad)), 0.0f);
             const float d = std::hypot(qx, qy) + inside - rad;
             return stroke > 0 ? std::abs(d + stroke / 2) - stroke / 2 : d;
-        });
+        };
+        const int R = static_cast<int>(std::ceil(rad)) + 1;
+        if (stroke > 0 || iw <= 2 * R || ih <= 2 * R)
+        {
+            BlendShape(dc, r, c, dist);  // outlines and small shapes: render it all
+            return;
+        }
+        // Filled and large (cards, fields): only the four corners need smoothing; the rest is solid.
+        HBRUSH b = CreateSolidBrush(c);
+        const RECT mid{r.left, r.top + R, r.right, r.bottom - R}, top{r.left + R, r.top, r.right - R, r.top + R},
+            bottom{r.left + R, r.bottom - R, r.right - R, r.bottom};
+        FillRect(dc, &mid, b);
+        FillRect(dc, &top, b);
+        FillRect(dc, &bottom, b);
+        DeleteObject(b);
+        BlendShape(dc, r, c, dist, RECT{0, 0, R, R});
+        BlendShape(dc, r, c, dist, RECT{iw - R, 0, iw, R});
+        BlendShape(dc, r, c, dist, RECT{0, ih - R, R, ih});
+        BlendShape(dc, r, c, dist, RECT{iw - R, ih - R, iw, ih});
     }
 
     void FillCircle(HDC dc, POINT c, int radius, COLORREF color, float stroke)

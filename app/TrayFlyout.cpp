@@ -132,6 +132,11 @@ namespace
     // Where the switches write: this microphone's own settings if it has custom ones, else the defaults.
     const wchar_t* Scope() { return !g_micGuid.empty() && Settings::IsDeviceCustom(g_micGuid.c_str()) ? g_micGuid.c_str() : nullptr; }
 
+    // This microphone's effective settings (its own if custom, else the defaults). Read from the registry
+    // only when something changed (switch flipped, microphone picked, settings changed elsewhere).
+    Settings g_settings{};
+    void ReloadSettings() { g_settings = Settings::ReadFromRegistry(g_micGuid.empty() ? nullptr : g_micGuid.c_str()); }
+
     // ---------------------------------------------------------------- live state (100 ms timer)
 
     bool g_recording = false;
@@ -230,6 +235,35 @@ namespace
         }
     }
 
+    // Fonts, made once per DPI.
+    struct
+    {
+        UINT dpi = 0;
+        HFONT title = nullptr, body = nullptr, note = nullptr, icons = nullptr;
+    } g_fonts;
+    void Fonts(UINT dpi)
+    {
+        if (g_fonts.dpi == dpi) return;
+        for (HFONT f : {g_fonts.title, g_fonts.body, g_fonts.note, g_fonts.icons})
+            if (f) DeleteObject(f);
+        g_fonts = {dpi, ui::Font(11, FW_SEMIBOLD, dpi), ui::Font(10, FW_NORMAL, dpi), ui::Font(8, FW_NORMAL, dpi), ui::IconFont(10, dpi)};
+    }
+
+    // What the dots and status lines show right now; the timer repaints only when this changes.
+    std::wstring g_shown;
+    std::wstring LiveView()
+    {
+        std::wstring v;
+        for (int row = 0; row < ROW_COUNT; ++row)
+        {
+            std::wstring detail;
+            v += static_cast<wchar_t>(L'0' + static_cast<int>(RowState(g_settings, row, detail)));
+            v += detail;
+            v += L'|';
+        }
+        return v;
+    }
+
     void Paint(HWND hwnd)
     {
         PAINTSTRUCT ps;
@@ -241,14 +275,13 @@ namespace
         auto oldBmp = SelectObject(dc, bmp);
         const ui::Theme t = ui::CurrentTheme();
         const UINT dpi = Dpi();
-        // This microphone's effective settings (its own if custom, else the defaults).
-        const Settings s = Settings::ReadFromRegistry(g_micGuid.empty() ? nullptr : g_micGuid.c_str());
+        const Settings& s = g_settings;
 
         HBRUSH bg = CreateSolidBrush(t.bg);
         FillRect(dc, &client, bg);
         DeleteObject(bg);
-        HFONT title = ui::Font(11, FW_SEMIBOLD, dpi), body = ui::Font(10, FW_NORMAL, dpi), note = ui::Font(8, FW_NORMAL, dpi),
-              icons = ui::IconFont(10, dpi);
+        Fonts(dpi);
+        HFONT title = g_fonts.title, body = g_fonts.body, note = g_fonts.note, icons = g_fonts.icons;
         auto of = SelectObject(dc, title);
         ui::Text(dc, L"WebRTC Audio Engine", {S(kPad), 0, S(kWidth - kPad), S(kTitleH)}, t.text);
 
@@ -287,10 +320,6 @@ namespace
         if (g_cues && g_focus == F_MIC && !ui::ListOpen()) ui::DrawFocus(dc, MicRect(), S(6), t, dpi);
 
         SelectObject(dc, of);
-        DeleteObject(title);
-        DeleteObject(body);
-        DeleteObject(note);
-        DeleteObject(icons);
         BitBlt(wdc, 0, 0, client.right, client.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, oldBmp);
         DeleteObject(bmp);
@@ -319,6 +348,7 @@ namespace
         }
         if (Settings::WriteToRegistry(s, Scope()) != ERROR_SUCCESS)
             MessageBeep(MB_ICONWARNING);  // e.g. the settings key is missing or not writable
+        ReloadSettings();
         InvalidateRect(g_flyout, nullptr, FALSE);
     }
 
@@ -327,6 +357,7 @@ namespace
         if (i < 0 || i >= static_cast<int>(g_mics.size())) return;
         g_micGuid = g_mics[static_cast<size_t>(i)].guid;
         SavePreferredMic(g_micGuid);
+        ReloadSettings();
         g_speech = false;
         ReadLive();
         InvalidateRect(g_flyout, nullptr, FALSE);
@@ -360,6 +391,7 @@ namespace
     void ShowFlyout()
     {
         RefreshMics();
+        ReloadSettings();
         ReadLive();
         g_focus = F_MIC;
         g_cues = false;
@@ -483,9 +515,16 @@ namespace
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         case WM_TIMER:
+        {
             ReadLive();
-            InvalidateRect(hwnd, nullptr, FALSE);
+            std::wstring view = LiveView();
+            if (view != g_shown)  // nothing visible changed: no repaint
+            {
+                g_shown = std::move(view);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
+        }
         case WM_LBUTTONDOWN:
         {
             g_cues = false;
@@ -566,6 +605,9 @@ namespace tray
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         if (g_icon) DestroyIcon(g_icon);
         if (g_flyout) DestroyWindow(g_flyout);
+        for (HFONT f : {g_fonts.title, g_fonts.body, g_fonts.note, g_fonts.icons})
+            if (f) DeleteObject(f);
+        g_fonts = {};
         g_icon = nullptr;
         g_flyout = nullptr;
     }
@@ -573,6 +615,9 @@ namespace tray
     void SettingsChanged()
     {
         if (g_flyout && IsWindowVisible(g_flyout))
+        {
+            ReloadSettings();
             InvalidateRect(g_flyout, nullptr, FALSE);
+        }
     }
 }

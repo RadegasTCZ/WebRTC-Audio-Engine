@@ -8,6 +8,7 @@
 #include <functional>
 #include <random>
 #include <vector>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -600,6 +601,53 @@ int main()
             EXPECT(std::isfinite(lo) && std::isfinite(hi) && lo >= 0.0f && hi <= 1.0f, "speech out of range");
             EXPECT(last < 0.5f, "steady noise reads as speech (%.2f)", last);
         }
+    }
+
+    std::printf("[17] cost per 10 ms block on this machine (informational; the audio thread has 10 ms)\n");
+    {
+        const int n = 48000 * 20;
+        std::mt19937 rng(5);
+        std::normal_distribution<float> g(0.0f, 0.05f);
+        std::vector<float> farEnd(n), mic(static_cast<size_t>(kCh) * n);
+        for (int f = 0; f < n; ++f)
+        {
+            farEnd[f] = g(rng);
+            for (int c = 0; c < kCh; ++c) mic[static_cast<size_t>(f) * kCh + c] = 0.3f * farEnd[f] + 0.01f * g(rng);
+        }
+        auto bench = [&](const char* name, Settings st, bool withRef, int rate = 48000) {
+            ReferenceRing ring;
+            ring.Init(48000);
+            VoiceProcessor vp;
+            vp.SetReference(withRef ? &ring : nullptr);
+            vp.Prepare(kCh, rate, st);
+            const int block = rate / 100;
+            std::vector<float> y(static_cast<size_t>(kCh) * block);
+            std::vector<double> us;
+            for (int pos = 0; pos + block <= n; pos += block)
+            {
+                ring.Write(farEnd.data() + pos, 480);
+                const auto t0 = std::chrono::steady_clock::now();
+                vp.Process(mic.data() + static_cast<size_t>(pos) * kCh, y.data(), block, st);
+                us.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+            }
+            us.erase(us.begin(), us.begin() + 100);  // warm-up
+            std::sort(us.begin(), us.end());
+            double sum = 0;
+            for (double v : us) sum += v;
+            std::printf("    %-34s mean %5.0f us (%4.1f %% of one core), p99 %5.0f us, max %5.0f us\n", name, sum / us.size(),
+                        sum / us.size() / 100.0, us[us.size() * 99 / 100], us.back());
+        };
+        Settings all = def; all.aecEnabled = 1; all.nsEnabled = 1; all.agcEnabled = 1; all.limiterEnabled = 1;
+        bench("everything on (AEC with speakers)", all, true);
+        Settings noAec = all; noAec.aecEnabled = 0;
+        bench("AEC switched off (reference kept)", noAec, true);
+        bench("no speaker reference (no AEC3)", all, false);
+        Settings noNs = all; noNs.nsEnabled = 0;
+        bench("NS switched off", noNs, true);
+        Settings none = all; none.aecEnabled = 0; none.nsEnabled = 0; none.agcEnabled = 0; none.hpfEnabled = 0; none.lpfEnabled = 0;
+        none.limiterEnabled = 0;
+        bench("all switched off (reference kept)", none, true);
+        bench("everything on, 32 kHz mic (resampled)", all, true, 32000);
     }
 
     std::printf(g_failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", g_failures);
