@@ -570,6 +570,38 @@ int main()
                "timeline line wrong: %s", lines.size() > 1 ? lines[1].c_str() : "");
     }
 
+    std::printf("[16] speech meter (for the tray's activity dots): a 0..1 probability, low on steady noise, also with AGC off\n");
+    {
+        for (const bool agc : {true, false})
+        {
+            Settings s{};
+            s.agcEnabled = agc ? 1u : 0u;
+            VoiceProcessor p;
+            p.Prepare(kCh, 48000, s);
+            const auto in = Noise(48000 * 5, -50.0f, 7);
+            std::vector<float> out(in.size());
+            float lo = 1.0f, hi = 0.0f, last = 0.0f;
+            int meters = 0;
+            for (int pos = 0; pos < 48000 * 5; pos += 480)
+            {
+                const size_t off = static_cast<size_t>(pos) * kCh;
+                p.Process(in.data() + off, out.data() + off, 480, s);
+                VoiceProcessor::Meters m;
+                if (p.TakeMeters(m))
+                {
+                    ++meters;
+                    lo = std::min(lo, m.speech);
+                    hi = std::max(hi, m.speech);
+                    last = m.speech;
+                }
+            }
+            std::printf("    AGC %-3s: %d meters, speech %.2f..%.2f, last %.2f\n", agc ? "on" : "off", meters, lo, hi, last);
+            EXPECT(meters >= 45, "too few meters (%d)", meters);
+            EXPECT(std::isfinite(lo) && std::isfinite(hi) && lo >= 0.0f && hi <= 1.0f, "speech out of range");
+            EXPECT(last < 0.5f, "steady noise reads as speech (%.2f)", last);
+        }
+    }
+
     std::printf(g_failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

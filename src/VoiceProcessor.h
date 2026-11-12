@@ -73,6 +73,7 @@ public:
     {
         float inputDbfs = -120, outputDbfs = -120, referenceDbfs = -120;
         float echoRemovedDb = 0, agcGainDb = 0, limiterDb = 0;
+        float speech = 0;  // mean speech probability (AGC2 voice detector, runs even when AGC is off)
         bool aecRunning = false;
     };
     bool TakeMeters(Meters& out) noexcept
@@ -202,6 +203,7 @@ private:
     int m_meterBlocks = 0;
     double m_inSq = 0, m_outSq = 0, m_refSq = 0;
     float m_limPeakDb = 0;
+    float m_speechSum = 0;
 
     std::unique_ptr<Resampling> m_rs;   // null at 48 kHz
     int m_rate = 0;

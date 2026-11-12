@@ -438,6 +438,7 @@ STDMETHODIMP_(void) CEngineApo::APOProcess(UINT32 u32NumInputConnections, APO_CO
                 d.inputDbfs = mt.inputDbfs; d.outputDbfs = mt.outputDbfs; d.referenceDbfs = mt.referenceDbfs;
                 d.echoRemovedDb = mt.echoRemovedDb; d.agcGainDb = mt.agcGainDb; d.limiterDb = mt.limiterDb;
                 d.aecRunning = mt.aecRunning ? 1u : 0u;
+                d.speech = mt.speech;
                 d.sampleRate = static_cast<uint32_t>(m_proc.SampleRate());
                 telemetry::Publish(m_telemetry, d);
             }

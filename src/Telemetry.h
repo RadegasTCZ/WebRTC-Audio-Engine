@@ -10,8 +10,8 @@
 // real-time path; slots are claimed on non-real-time threads.
 namespace telemetry
 {
-    inline constexpr wchar_t kSectionName[] = L"Global\\WebrtcAudioEngineTelemetry3";
-    inline constexpr uint32_t kVersion = 3;
+    inline constexpr wchar_t kSectionName[] = L"Global\\WebrtcAudioEngineTelemetry4";
+    inline constexpr uint32_t kVersion = 4;
     inline constexpr int kMaxSlots = 8;
     inline constexpr uint64_t kSlotStaleMs = 5000;  // a slot not updated for this long may be reused
 
@@ -25,6 +25,7 @@ namespace telemetry
         float limiterDb = 0;          // limiter gain reduction
         uint32_t aecRunning = 0;      // 1 = this stream has an echo reference and AEC3
         uint32_t sampleRate = 0;
+        float speech = 0;             // mean speech probability 0..1 over the last ~100 ms (AGC2 voice detector)
     };
 
     struct Slot

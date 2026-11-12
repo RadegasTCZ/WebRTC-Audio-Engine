@@ -487,6 +487,7 @@ void VoiceProcessor::ProcessBlock() noexcept
         if (m_aec) m_refSq += static_cast<double>(m_ref[i]) * m_ref[i];
     }
     m_limPeakDb = std::max(m_limPeakDb, m_limiter->LastReductionDb());
+    m_speechSum += m_agc->LastSpeechProbability();
     if (++m_meterBlocks == 10)
     {
         constexpr double n = 10.0 * kBlock;
@@ -498,10 +499,12 @@ void VoiceProcessor::ProcessBlock() noexcept
         m_meters.echoRemovedDb = m_aec ? static_cast<float>(m_aec->controller->GetMetrics().echo_return_loss_enhancement) : 0.0f;
         m_meters.agcGainDb = m_settings.agcEnabled ? m_agc->LastGainDb() : 0.0f;
         m_meters.limiterDb = m_settings.limiterEnabled ? m_limPeakDb : 0.0f;
+        m_meters.speech = m_speechSum / 10.0f;
         m_metersReady = true;
         m_meterBlocks = 0;
         m_inSq = m_outSq = m_refSq = 0;
         m_limPeakDb = 0;
+        m_speechSum = 0;
     }
 
     if (m_nextLevel >= 0)

@@ -40,6 +40,7 @@ public:
 
     void Process(float* frame) noexcept;  // never allocates
     float LastGainDb() const noexcept { return m_lastGainDb; }
+    float LastSpeechProbability() const noexcept { return m_lastSpeechProb; }  // RNN VAD, 0..1, last frame
     const AgcParams& Params() const noexcept { return m_params; }
 
 private:
@@ -52,6 +53,7 @@ private:
     std::unique_ptr<webrtc::AdaptiveDigitalGainController> m_controller;
     std::unique_ptr<webrtc::FixedDigitalLevelEstimator> m_outputLevel;
     float m_lastGainDb = 0.0f;
+    float m_lastSpeechProb = 0.0f;
     float m_buffer[kFrameSize]{};
 };
 

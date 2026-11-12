@@ -78,6 +78,7 @@ void AgcStage::Process(float* frame) noexcept
     webrtc::DeinterleavedView<const float> constView(m_buffer, kFrameSize, 1);
 
     const float prob = m_vad->Analyze(constView);
+    m_lastSpeechProb = prob;
     const float rmsDbfs = webrtc::FloatS16ToDbfs(std::sqrt(inSq / static_cast<float>(kFrameSize)));
     const float peakDbfs = webrtc::FloatS16ToDbfs(peak);
     const float noiseDbfs = m_noiseLevel->Analyze(constView);
