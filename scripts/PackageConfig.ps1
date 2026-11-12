@@ -7,7 +7,10 @@ $Script:PackageOut      = Join-Path $WorkspaceRoot 'build\package'
 $Script:CertSubject     = 'CN=WebRTC Audio Engine Test Signing (RadegasTCZ)'
 $Script:ComponentInf    = 'WebrtcAudioEngine.inf'
 $Script:ExtensionInf    = 'WebrtcAudioEngine-Extension.inf'
+$Script:AppInf          = 'WebrtcAudioEngine-App.inf'
 $Script:SwcHardwareId   = 'SWC\VEN_WRTC&AUDIO_EFFECTPACK_WEBRTCENGINE'
+$Script:AppHardwareId   = 'SWC\VEN_WRTC&WEBRTCENGINE_SETTINGSAPP'
+$Script:DefaultAppExe   = Join-Path $WorkspaceRoot 'build\Release\WebrtcAudioEngineSettings.exe'
 $Script:EffectPackId    = '{9879C461-0BA4-4A7B-9F35-3C04EAC1772D}'
 
 function Find-KitTool([string]$Name) {
@@ -30,7 +33,7 @@ function Get-OurDriverPackages {
         if ($line -match '^\s*Published Name\s*:\s*(\S+)') { $cur = @{ Published = $Matches[1] } }
         elseif ($line -match '^\s*Original Name\s*:\s*(\S+)') {
             $cur.Original = $Matches[1]
-            if ($cur.Original -in @($ComponentInf.ToLower(), $ExtensionInf.ToLower(), $ComponentInf, $ExtensionInf)) { $list += [pscustomobject]$cur }
+            if ($cur.Original -in @($ComponentInf, $ExtensionInf, $AppInf)) { $list += [pscustomobject]$cur }  # -in ignores case
         }
     }
     $list

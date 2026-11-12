@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-  Removes the "WebRTC Audio Engine" effect pack: its software-component device and both driver
-  packages. Windows Audio is stopped meanwhile. Does not touch the registry-route EFX install.
+  Removes the "WebRTC Audio Engine" effect pack: its software-component devices, the three driver
+  packages and the settings app (settings are kept). Windows Audio is stopped meanwhile.
   -RemoveCert also removes the test certificate.
 #>
 param([switch]$RemoveCert, [switch]$DryRun)
@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PackageConfig.ps1')
 Assert-Admin
 
-$devices = @(Get-PnpDevice | Where-Object { $_.HardwareID -contains $SwcHardwareId })
+$devices = @(Get-PnpDevice | Where-Object { $_.HardwareID -contains $SwcHardwareId -or $_.HardwareID -contains $AppHardwareId })
 $packages = @(Get-OurDriverPackages)
 Write-Host "Devices : $(if ($devices) { ($devices.InstanceId) -join ', ' } else { '(none)' })"
 Write-Host "Packages: $(if ($packages) { ($packages | ForEach-Object { "$($_.Published) ($($_.Original))" }) -join ', ' } else { '(none)' })"
@@ -24,6 +24,10 @@ try {
     foreach ($d in $devices) { & pnputil.exe /remove-device $d.InstanceId | Write-Host }
 }
 finally { Start-Audio }
+
+# The settings app Windows installed from the package (Program Files, Start menu, sign-in, Apps & features).
+$appExe = Join-Path $env:ProgramFiles 'WebrtcAudioEngine\WebrtcAudioEngineSettings.exe'
+if (Test-Path $appExe) { (Start-Process $appExe -ArgumentList '/uninstall' -PassThru).WaitForExit(); Write-Host 'Settings app removed (settings are kept).' }
 
 if ($RemoveCert) { & (Join-Path $PSScriptRoot 'New-TestCert.ps1') -Remove }
 Write-Host "`nEffect pack removed."

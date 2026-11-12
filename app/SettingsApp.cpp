@@ -137,6 +137,7 @@ namespace
 
     HWND g_wnd = nullptr;
     UINT g_showMsg = 0;          // "show your settings window" (sent by a second launch)
+    UINT g_quitMsg = 0;          // "exit" (sent by the installer before it replaces the exe)
     UINT g_dpi = 96;
     std::vector<app::Mic> g_mics;  // [0] = "Default (all microphones)"
     int g_sel = 0;
@@ -647,6 +648,11 @@ namespace
             app::ShowMainWindow();
             return 0;
         }
+        if (msg == g_quitMsg && g_quitMsg)
+        {
+            app::ExitApp();
+            return 0;
+        }
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
 }
@@ -669,10 +675,15 @@ void app::ExitApp()
 
 // "WebrtcAudioEngineSettings.exe"        : tray + open the settings window
 // "WebrtcAudioEngineSettings.exe /tray"  : tray only (started at sign-in)
+// "... /install [version]", "... /uninstall", "... /quit": set up / remove / close the app (Setup.cpp, no window)
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int show)
 {
+    if (cmdLine && wcsstr(cmdLine, L"/install")) return setup::Install(cmdLine);
+    if (cmdLine && wcsstr(cmdLine, L"/uninstall")) return setup::Uninstall(cmdLine);
+    if (cmdLine && wcsstr(cmdLine, L"/quit")) return setup::Quit();
     const bool trayOnly = cmdLine && wcsstr(cmdLine, L"/tray") != nullptr;
     g_showMsg = RegisterWindowMessageW(L"WebrtcAudioEngine.ShowSettings");
+    g_quitMsg = RegisterWindowMessageW(L"WebrtcAudioEngine.Quit");
 
     // Single instance: a second launch asks the running one to show its window.
     // ERROR_ACCESS_DENIED: the running copy is elevated, so its mutex is not ours to open, but it exists.

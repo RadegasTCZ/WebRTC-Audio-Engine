@@ -15,7 +15,8 @@ Test-signed, for test machines only.
 - `src/` the effect (APO DLL loaded by audiodg) and the processing core
 - `app/` "WebRTC Audio Engine Settings": settings window + tray flyout (microphone picker, activity dots), sharing one drawing kit (`Ui.*`)
 - `tools/` build-time helpers (`MakeIcon`: generates the app icon from `app/Glyph.h`)
-- `package/` driver packages (component + extension INF) that register the effect pack
+- `package/` driver packages: `component` (the effect), `app` (the settings app as a software component) and
+  `extension` (attaches both to the PC)
 - `scripts/` build, install and settings scripts
 - `tests/` offline tests (`ProcessorTests`, `ApoHarness`), `CaptureTest` (live mic check) and `PathProbe` (speaker path vs echo reference)
 - `third_party/` SpeexDSP resampler, WebRTC build stubs; upstream WebRTC is fetched by `scripts/Fetch-Upstream.ps1`
@@ -36,12 +37,17 @@ cmake --build ..\build --config Release
 ```powershell
 .\scripts\New-TestCert.ps1          # once: test-signing certificate (remove later with -Remove)
 .\scripts\Build-Package.ps1         # stage + sign the driver packages into ..\build\package
-.\scripts\Install-Package.ps1       # install the effect pack (restarts Windows Audio)
-.\scripts\Install-SettingsApp.ps1   # settings app, Start-menu shortcut, tray icon at sign-in
+.\scripts\Install-Package.ps1       # install the effect pack + settings app (restarts Windows Audio)
+.\scripts\Install-SettingsApp.ps1   # optional: update just the settings app from the build folder
 .\scripts\Set-VoiceSettings.ps1     # show/change settings from the command line
 .\scripts\Collect-Log.ps1           # copy + show the effect's log (C:\ProgramData\WebrtcVoiceApo\engine.log)
 ```
-Uninstall: `.\scripts\Uninstall-Package.ps1` and `.\scripts\Install-SettingsApp.ps1 -Uninstall`.
+Installing the driver installs the settings app too: Windows runs `WebrtcAudioEngineSettings.exe /install` from the
+package, which adds it to Program Files, the Start menu, sign-in (tray icon) and Apps & features
+(log: `%ProgramData%\WebrtcAudioEngine\setup.log`). Removing the app in Apps & features keeps the effect; the app
+comes back with the next driver version.
+
+Uninstall everything: `.\scripts\Uninstall-Package.ps1` (settings are kept).
 
 ## Licence
 GPL-3.0-or-later (see `LICENSE`). WebRTC is BSD-licensed; SpeexDSP is BSD-licensed (`third_party/speexdsp/COPYING`).

@@ -1,0 +1,54 @@
+; WebRTC Audio Engine: settings app as a software component (test-signed experiment).
+; The extension INF adds this component next to the effect pack, so installing the driver also
+; installs the app: Windows runs "WebrtcAudioEngineSettings.exe /install <version>" from the driver
+; store (as SYSTEM) once per SoftwareVersion. The exe copies itself to Program Files, adds the
+; Start-menu shortcut, the tray icon at sign-in and an Apps & features entry (app\Setup.cpp).
+; Build-Package.ps1 stamps DriverVer, SoftwareVersion and the version argument at build time.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = SoftwareComponent
+ClassGuid   = {5c4c3332-344d-483c-8739-259e934c9cc8}
+Provider    = %ProviderName%
+DriverVer   = 11/12/2026,0.14.0.0
+CatalogFile = WebrtcAudioEngine-App.cat
+PnpLockDown = 1
+
+[Manufacturer]
+%MfgName% = WebrtcApp,NTamd64
+
+[WebrtcApp.NTamd64]
+%App.ComponentDesc% = WebrtcApp_Install, SWC\VEN_WRTC&WEBRTCENGINE_SETTINGSAPP
+
+[WebrtcApp_Install.NTamd64]
+CopyFiles = WebrtcApp_CopyFiles
+
+[WebrtcApp_CopyFiles]
+WebrtcAudioEngineSettings.exe
+
+[WebrtcApp_Install.NTamd64.Services]
+AddService = ,2    ; no function driver, install a null driver
+
+[WebrtcApp_Install.NTamd64.Software]
+AddSoftware = WebrtcAudioEngineSettings,,WebrtcApp_Software
+
+[WebrtcApp_Software]
+SoftwareType      = 1      ; a Win32 program that Windows runs
+SoftwareBinary    = %13%\WebrtcAudioEngineSettings.exe
+SoftwareArguments = /install 0.14.0.0
+SoftwareVersion   = 0.14.0.0
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+WebrtcAudioEngineSettings.exe = 1
+
+[DestinationDirs]
+WebrtcApp_CopyFiles = 13 ; the package's DriverStore directory
+
+[Strings]
+ProviderName      = "RadegasTCZ"
+MfgName           = "RadegasTCZ"
+DiskName          = "WebRTC Audio Engine"
+App.ComponentDesc = "WebRTC Audio Engine Settings"

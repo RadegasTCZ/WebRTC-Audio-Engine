@@ -28,3 +28,10 @@ namespace tray
     void Shutdown();
     void SettingsChanged();        // repaint the flyout when settings change
 }
+
+namespace setup
+{
+    int Install(const wchar_t* cmdLine);    // "/install [version]": Program Files, shortcut, sign-in start, Apps & features
+    int Uninstall(const wchar_t* cmdLine);  // "/uninstall": removes all that (settings are kept)
+    int Quit();                             // "/quit": the running app in this session exits
+}

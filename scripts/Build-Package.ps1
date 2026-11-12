@@ -1,40 +1,46 @@
 <#
 .SYNOPSIS
-  Stages the effect-pack driver packages into <workspace>\build\package, creates the catalogs
-  with Inf2Cat and test-signs DLL + catalogs. Changes nothing on the system.
+  Stages the driver packages (effect pack, settings app, extension) into <workspace>\build\package,
+  creates the catalogs with Inf2Cat and test-signs DLL, exe and catalogs. Changes nothing on the system.
 #>
-param([string]$DllPath)
+param([string]$DllPath, [string]$AppExe)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PackageConfig.ps1')
 if (-not $DllPath) { $DllPath = $DefaultDll }
 if (-not (Test-Path $DllPath)) { throw "DLL not found: $DllPath (build first)" }
+if (-not $AppExe) { $AppExe = $DefaultAppExe }
+if (-not (Test-Path $AppExe)) { throw "Settings app not found: $AppExe (build first)" }
 $cert = Get-TestCert
 if (-not $cert) { throw 'No test certificate. Run .\New-TestCert.ps1 once (admin).' }
 $inf2cat = Find-KitTool 'Inf2Cat.exe'
 $signtool = Find-KitTool 'signtool.exe'
 
-foreach ($part in 'component', 'extension') {
+# Windows keeps an installed package whose DriverVer did not change ("already exists"), even if the files
+# are new. Every staged INF gets today's date and a version that grows with every build: major.minor from
+# the source INF, then days since 2026-01-01 and 2-second steps since midnight (each field below 65536).
+# The app INF's SoftwareVersion follows it too: Windows runs the app's installer once per SoftwareVersion.
+$now = Get-Date
+$build = '{0}.{1}' -f [int]($now.Date - [datetime]'2026-01-01').TotalDays, [int][math]::Floor($now.TimeOfDay.TotalSeconds / 2)
+$payload = @{ component = $DllPath; app = $AppExe }
+
+foreach ($part in 'component', 'app', 'extension') {
     $dst = Join-Path $PackageOut $part
     if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
     New-Item -ItemType Directory -Force $dst | Out-Null
     Copy-Item (Join-Path $PackageSrc "$part\*.inf") $dst
-    if ($part -eq 'component') {
-        # Windows keeps an installed package whose DriverVer did not change ("already exists"), even if the
-        # DLL is new. Stamp the staged INF with today's date and a version that grows with every build:
-        # major.minor from the source INF, then days since 2026-01-01 and 2-second steps since midnight
-        # (each field must stay below 65536).
-        $inf = Join-Path $dst $ComponentInf
-        $text = [IO.File]::ReadAllText($inf)
-        if ($text -notmatch 'DriverVer\s*=\s*[^,\r\n]+,\s*(\d+)\.(\d+)\.\d+\.\d+') { throw "No DriverVer in $inf" }
-        $now = Get-Date
-        $version = '{0}.{1}.{2}.{3}' -f $Matches[1], $Matches[2], [int]($now.Date - [datetime]'2026-01-01').TotalDays,
-                   [int][math]::Floor($now.TimeOfDay.TotalSeconds / 2)
-        $text = $text -replace 'DriverVer\s*=\s*[^\r\n]+', ('DriverVer   = {0},{1}' -f $now.ToString('MM/dd/yyyy', [cultureinfo]::InvariantCulture), $version)
-        [IO.File]::WriteAllText($inf, $text)
-        Write-Host "  component version $version"
-        Copy-Item $DllPath $dst
-        & $signtool sign /q /sm /s My /sha1 $cert.Thumbprint /fd sha256 (Join-Path $dst 'WebrtcVoiceApo.dll')
-        if ($LASTEXITCODE) { throw 'signtool failed on the DLL' }
+    $inf = Get-ChildItem $dst -Filter *.inf | Select-Object -First 1
+    $text = [IO.File]::ReadAllText($inf.FullName)
+    if ($text -notmatch 'DriverVer\s*=\s*[^,\r\n]+,\s*(\d+)\.(\d+)\.\d+\.\d+') { throw "No DriverVer in $($inf.Name)" }
+    $version = '{0}.{1}.{2}' -f $Matches[1], $Matches[2], $build
+    $text = $text -replace 'DriverVer\s*=\s*[^\r\n]+', ('DriverVer   = {0},{1}' -f $now.ToString('MM/dd/yyyy', [cultureinfo]::InvariantCulture), $version)
+    $text = $text -replace '(?m)^(SoftwareVersion\s*=\s*)\S+', "`${1}$version"
+    $text = $text -replace '(?m)^(SoftwareArguments\s*=\s*/install)\s+\S+', "`${1} $version"
+    [IO.File]::WriteAllText($inf.FullName, $text)
+    Write-Host "  $part version $version"
+    if ($payload[$part]) {
+        Copy-Item $payload[$part] $dst
+        & $signtool sign /q /sm /s My /sha1 $cert.Thumbprint /fd sha256 (Join-Path $dst (Split-Path $payload[$part] -Leaf))
+        if ($LASTEXITCODE) { throw "signtool failed on $(Split-Path $payload[$part] -Leaf)" }
     }
     Write-Host "Inf2Cat ($part)..."
     $o = & $inf2cat /driver:$dst /os:10_GE_X64 /uselocaltime 2>&1
