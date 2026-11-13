@@ -83,7 +83,9 @@
 
     <InstallExecuteSequence>
       <!-- Install / repair: after the files and the registry marker are in place. -->
-      <Custom Action="RollbackInstallDrivers" After="WriteRegistryValues" Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
+      <!-- Its rollback (a full driver uninstall) only for a first install: a failed repair must not
+           remove a working installation. -->
+      <Custom Action="RollbackInstallDrivers" After="WriteRegistryValues" Condition="NOT Installed AND NOT (REMOVE~=&quot;ALL&quot;)" />
       <Custom Action="InstallDrivers" After="RollbackInstallDrivers" Condition="NOT (REMOVE~=&quot;ALL&quot;)" />
       <!-- Uninstall (also of the old version during an upgrade): while the files are still there. -->
       <Custom Action="RollbackUninstallDrivers" Before="UninstallDrivers" Condition="REMOVE~=&quot;ALL&quot;" />

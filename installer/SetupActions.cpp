@@ -341,37 +341,48 @@ namespace
                 Log(L"%s is not owned by SYSTEM/Administrators: log folder left alone", dir.c_str());
                 return;
             }
-            WIN32_FIND_DATAW fd{};
-            HANDLE f = FindFirstFileW((dir + L"\\*").c_str(), &fd);
-            bool links = false;
-            if (f != INVALID_HANDLE_VALUE)
-            {
-                do links = links || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
-                while (FindNextFileW(f, &fd));
-                FindClose(f);
-            }
-            if (links)
-            {
-                Log(L"%s contains links: log folder left alone", dir.c_str());
-                return;
-            }
         }
         PSECURITY_DESCRIPTOR sd = nullptr;
         if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kLogDirSddl, SDDL_REVISION_1, &sd, nullptr)) return;
         SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
         if (attrs == INVALID_FILE_ATTRIBUTES && !CreateDirectoryW(dir.c_str(), &sa))
             Log(L"could not create %s (error %lu)", dir.c_str(), GetLastError());
-        BOOL present = FALSE, defaulted = FALSE;
-        PACL dacl = nullptr;
-        if (GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present)
-        {
-            // The folder gets the protected ACL; files already inside inherit it.
-            const DWORD r = TreeResetNamedSecurityInfoW(const_cast<LPWSTR>(dir.c_str()), SE_FILE_OBJECT,
-                                                        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                                                        nullptr, nullptr, dacl, nullptr, FALSE, nullptr, ProgressInvokeNever, nullptr);
-            Log(L"log folder %s prepared (%lu)", dir.c_str(), r);
-        }
+        // The folder gets the protected ACL. SetFileSecurityW sets it on the folder alone and does not
+        // propagate to the files inside: a propagating reset, run as SYSTEM, would also rewrite the ACL of
+        // whatever file a planted hard link points to.
+        const BOOL set = SetFileSecurityW(dir.c_str(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, sd);
+        Log(L"log folder %s prepared (%lu)", dir.c_str(), set ? 0ul : GetLastError());
         LocalFree(sd);
+        // Now that ordinary users can no longer add entries, remove any that are links (reparse points, or
+        // files with more than one name). Plain log files stay.
+        WIN32_FIND_DATAW fd{};
+        HANDLE f = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+        if (f == INVALID_HANDLE_VALUE)
+            return;
+        do
+        {
+            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+                continue;
+            const std::wstring path = dir + L"\\" + fd.cFileName;
+            bool link = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+            if (!link && !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            {
+                HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                       nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+                BY_HANDLE_FILE_INFORMATION info{};
+                if (h != INVALID_HANDLE_VALUE)
+                {
+                    link = GetFileInformationByHandle(h, &info) && info.nNumberOfLinks > 1;
+                    CloseHandle(h);
+                }
+            }
+            if (!link)
+                continue;
+            // Deleting a link removes only the link itself, never its target.
+            const BOOL gone = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? RemoveDirectoryW(path.c_str()) : DeleteFileW(path.c_str());
+            Log(L"removed link %s from the log folder (%s)", path.c_str(), gone ? L"ok" : L"failed");
+        } while (FindNextFileW(f, &fd));
+        FindClose(f);
     }
 
     // ------------------------------------------------------------------ install / uninstall
