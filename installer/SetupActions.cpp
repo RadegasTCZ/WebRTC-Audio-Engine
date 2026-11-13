@@ -1,12 +1,13 @@
 // MSI custom actions for the WebRTC Audio Engine installer (installer/Product.wxs).
 //
 // The MSI copies the three signed driver packages to <Program Files>\WebrtcAudioEngine\Driver\ and then calls:
-//   InstallDrivers   (deferred, as SYSTEM): trust the signing certificate, prepare the effect's log folder, stop
+//   InstallDrivers   (deferred, as SYSTEM): trust the signing certificate, remove the old log folder, stop
 //                    Windows Audio, install component -> app -> extension, start Windows Audio, remove superseded
 //                    versions of our packages.
 //   UninstallDrivers (deferred, as SYSTEM): stop Windows Audio, uninstall extension -> component -> app, remove
 //                    their software devices, start Windows Audio, remove the settings app (it installed itself
 //                    from the app package), take back the certificate trust we added. Settings are kept.
+//   RemoveLogs       (deferred, as SYSTEM, only on a real uninstall, not during an upgrade): the effect's logs.
 // Each is also the other's rollback action. CustomActionData = the Driver folder (with a trailing backslash).
 //
 // This is the C++ form of scripts\Install-Package.ps1 / Uninstall-Package.ps1. It uses the driver APIs instead
@@ -37,10 +38,6 @@ namespace
     constexpr wchar_t kCertFile[] = L"WebrtcAudioEngine.cer";
     // Which certificate stores we added the certificate to (so uninstall only takes back our own trust).
     constexpr wchar_t kSetupStateKey[] = L"SOFTWARE\\WebrtcAudioEngineSetup\\State";
-    // The effect's log folder: audiodg (LOCAL SERVICE, sometimes with an app-container token) writes, Users read.
-    // Same rights as Initialize-LogDir in scripts\ApoConfig.ps1.
-    constexpr wchar_t kLogDirSddl[] = L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;LS)"
-                                      L"(A;OICI;0x1301bf;;;AC)(A;OICI;0x1301bf;;;S-1-15-2-2)(A;OICI;0x1200a9;;;BU)";
 
     MSIHANDLE g_session = 0;
 
@@ -310,79 +307,72 @@ namespace
         RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kSetupStateKey, KEY_WOW64_64KEY, 0);
     }
 
-    // ------------------------------------------------------------------ the effect's log folder
+    // ------------------------------------------------------------------ the effect's log folders
 
     bool IsAdminOrSystem(PSID sid)
     {
         return sid && (IsWellKnownSid(sid, WinLocalSystemSid) || IsWellKnownSid(sid, WinBuiltinAdministratorsSid));
     }
 
-    void PrepareLogDir()
+    // Removes one of our log folders, as SYSTEM, without ever acting through a link: a junction or symlink
+    // is removed itself (never what it points to), files are deleted by name (a hard link loses only that
+    // name), and subfolders that are not links are left alone. A folder whose owner is not SYSTEM,
+    // Administrators or `allowedOwner` is not touched at all: its owner could swap it for a junction while
+    // we delete inside it.
+    void RemoveLogFolder(const std::wstring& dir, WELL_KNOWN_SID_TYPE allowedOwner)
     {
-        const std::wstring programData = KnownFolder(FOLDERID_ProgramData);
-        if (programData.empty()) return;
-        const std::wstring dir = programData + L"\\WebrtcVoiceApo";
         const DWORD attrs = GetFileAttributesW(dir.c_str());
-        if (attrs != INVALID_FILE_ATTRIBUTES)
+        if (attrs == INVALID_FILE_ATTRIBUTES)
+            return;
+        if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
         {
-            // The ACL is rewritten below as SYSTEM: never on a folder an ordinary user could have prepared.
-            if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
-            {
-                Log(L"%s is a link: log folder left alone", dir.c_str());
-                return;
-            }
-            PSID owner = nullptr;
-            PSECURITY_DESCRIPTOR sd = nullptr;
-            const bool trusted = GetNamedSecurityInfoW(dir.c_str(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr,
-                                                       nullptr, nullptr, &sd) == ERROR_SUCCESS && IsAdminOrSystem(owner);
-            LocalFree(sd);
-            if (!trusted)
-            {
-                Log(L"%s is not owned by SYSTEM/Administrators: log folder left alone", dir.c_str());
-                return;
-            }
+            Log(L"old log folder %s is a link: removed the link (%s)", dir.c_str(), RemoveDirectoryW(dir.c_str()) ? L"ok" : L"failed");
+            return;
         }
+        PSID owner = nullptr;
         PSECURITY_DESCRIPTOR sd = nullptr;
-        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kLogDirSddl, SDDL_REVISION_1, &sd, nullptr)) return;
-        SECURITY_ATTRIBUTES sa{sizeof(sa), sd, FALSE};
-        if (attrs == INVALID_FILE_ATTRIBUTES && !CreateDirectoryW(dir.c_str(), &sa))
-            Log(L"could not create %s (error %lu)", dir.c_str(), GetLastError());
-        // The folder gets the protected ACL. SetFileSecurityW sets it on the folder alone and does not
-        // propagate to the files inside: a propagating reset, run as SYSTEM, would also rewrite the ACL of
-        // whatever file a planted hard link points to.
-        const BOOL set = SetFileSecurityW(dir.c_str(), DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, sd);
-        Log(L"log folder %s prepared (%lu)", dir.c_str(), set ? 0ul : GetLastError());
+        const bool trusted = GetNamedSecurityInfoW(dir.c_str(), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr,
+                                                   nullptr, nullptr, &sd) == ERROR_SUCCESS &&
+                             (IsAdminOrSystem(owner) || IsWellKnownSid(owner, allowedOwner));
         LocalFree(sd);
-        // Now that ordinary users can no longer add entries, remove any that are links (reparse points, or
-        // files with more than one name). Plain log files stay.
+        if (!trusted)
+        {
+            Log(L"log folder %s has an untrusted owner: left alone", dir.c_str());
+            return;
+        }
         WIN32_FIND_DATAW fd{};
         HANDLE f = FindFirstFileW((dir + L"\\*").c_str(), &fd);
-        if (f == INVALID_HANDLE_VALUE)
-            return;
-        do
+        if (f != INVALID_HANDLE_VALUE)
         {
-            if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
-                continue;
-            const std::wstring path = dir + L"\\" + fd.cFileName;
-            bool link = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-            if (!link && !(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            do
             {
-                HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                       nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-                BY_HANDLE_FILE_INFORMATION info{};
-                if (h != INVALID_HANDLE_VALUE)
-                {
-                    link = GetFileInformationByHandle(h, &info) && info.nNumberOfLinks > 1;
-                    CloseHandle(h);
-                }
-            }
-            if (!link)
-                continue;
-            // Deleting a link removes only the link itself, never its target.
-            const BOOL gone = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? RemoveDirectoryW(path.c_str()) : DeleteFileW(path.c_str());
-            Log(L"removed link %s from the log folder (%s)", path.c_str(), gone ? L"ok" : L"failed");
-        } while (FindNextFileW(f, &fd));
-        FindClose(f);
+                if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+                    continue;
+                const std::wstring path = dir + L"\\" + fd.cFileName;
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                    DeleteFileW(path.c_str());
+                else if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+                    RemoveDirectoryW(path.c_str());
+            } while (FindNextFileW(f, &fd));
+            FindClose(f);
+        }
+        Log(L"log folder %s removed (%s)", dir.c_str(), RemoveDirectoryW(dir.c_str()) ? L"ok" : L"not empty or in use");
+    }
+
+    // Before 2026-11-13 the effect logged to C:\ProgramData\WebrtcVoiceApo; it now logs to its own temp folder.
+    void RemoveOldLogFolder()
+    {
+        const std::wstring programData = KnownFolder(FOLDERID_ProgramData);
+        if (!programData.empty())
+            RemoveLogFolder(programData + L"\\WebrtcVoiceApo", WinLocalSystemSid);
+    }
+
+    // The effect's current log folder: audiodg's (LOCAL SERVICE) temp folder, see src\Log.cpp. Only SYSTEM,
+    // Administrators and LOCAL SERVICE can open that temp folder, and the effect itself owns the subfolder.
+    void RemoveEffectLogFolder()
+    {
+        RemoveLogFolder(WindowsDir() + L"\\ServiceProfiles\\LocalService\\AppData\\Local\\Temp\\WebrtcAudioEngine",
+                        WinLocalServiceSid);
     }
 
     // ------------------------------------------------------------------ install / uninstall
@@ -394,7 +384,7 @@ namespace
         Log(L"installing from %s", driverDir.c_str());
 
         TrustCertificate(driverDir);  // a failure shows up as a refused package below
-        PrepareLogDir();
+        RemoveOldLogFolder();
 
         const std::vector<OemInf> before = OurPackages();
         UINT result = ERROR_SUCCESS;
@@ -532,4 +522,13 @@ extern "C" __declspec(dllexport) UINT __stdcall InstallDrivers(MSIHANDLE session
 extern "C" __declspec(dllexport) UINT __stdcall UninstallDrivers(MSIHANDLE session)
 {
     return Run(session, DoUninstall);
+}
+
+extern "C" __declspec(dllexport) UINT __stdcall RemoveLogs(MSIHANDLE session)
+{
+    return Run(session, [] {
+        RemoveOldLogFolder();
+        RemoveEffectLogFolder();
+        return static_cast<UINT>(ERROR_SUCCESS);  // best effort
+    });
 }

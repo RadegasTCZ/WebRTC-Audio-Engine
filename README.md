@@ -40,8 +40,12 @@ cmake --build ..\build --config Release
 .\scripts\Install-Package.ps1       # install the effect pack + settings app (restarts Windows Audio)
 .\scripts\Install-SettingsApp.ps1   # optional: update just the settings app from the build folder
 .\scripts\Set-VoiceSettings.ps1     # show/change settings from the command line
-.\scripts\Collect-Log.ps1           # copy + show the effect's log (C:\ProgramData\WebrtcVoiceApo\engine.log)
+.\scripts\Collect-Log.ps1           # copy the newest log segments to ..\logs and show the end (-All, -Zip)
 ```
+The effect logs to audiodg's own temp folder, `C:\Windows\ServiceProfiles\LocalService\AppData\Local\Temp\WebrtcAudioEngine`
+(admins only), as `engine-<start time>.log` segments: a new one per audio session, per day and per 1 MB. It keeps
+the newest 10, none older than 14 days; uninstalling removes them.
+
 Installing the driver installs the settings app too: Windows runs `WebrtcAudioEngineSettings.exe /install` from the
 package, which adds it to Program Files, the Start menu, sign-in (tray icon) and Apps & features
 (log: `%ProgramData%\WebrtcAudioEngine\setup.log`). Removing the app in Apps & features keeps the effect; the app

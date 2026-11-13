@@ -74,6 +74,9 @@
                   Execute="rollback" Impersonate="no" Return="ignore" />
     <CustomAction Id="UninstallDrivers" BinaryRef="SetupActions" DllEntry="UninstallDrivers"
                   Execute="deferred" Impersonate="no" Return="ignore" />
+    <!-- The effect's logs: only on a real uninstall (an upgrade also uninstalls the old version). -->
+    <CustomAction Id="RemoveLogs" BinaryRef="SetupActions" DllEntry="RemoveLogs"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
 
     <!-- CustomActionData of each deferred action: the Driver folder. -->
     <SetProperty Id="RollbackInstallDrivers" Value="[DRIVERFOLDER]" After="CostFinalize" Sequence="execute" />
@@ -90,6 +93,7 @@
       <!-- Uninstall (also of the old version during an upgrade): while the files are still there. -->
       <Custom Action="RollbackUninstallDrivers" Before="UninstallDrivers" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="UninstallDrivers" Before="RemoveRegistryValues" Condition="REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="RemoveLogs" After="UninstallDrivers" Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
   </Package>
 </Wix>

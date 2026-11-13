@@ -20,7 +20,6 @@ $existing = Get-OurDriverPackages
 if ($existing) { Write-Host "Already in the driver store: $(($existing | ForEach-Object { "$($_.Published) ($($_.Original))" }) -join ', ')" }
 if ($DryRun) { Write-Host "`nDry run: nothing was changed."; return }
 
-Initialize-LogDir  # diagnostics log of the effect (writable only by the audio engine)
 Stop-Audio
 try {
     # Components first, so they are in the store when the extension creates the software components.

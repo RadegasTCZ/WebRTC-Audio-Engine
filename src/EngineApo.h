@@ -18,7 +18,7 @@ void SignalSystemEffectsChanged() noexcept;
 // running VoiceProcessor (cleanup filters, AEC3 with the render loopback as auxiliary input, NS, AGC2,
 // limiter). It also applies the mic volume slider in software, reports AEC/NS/AGC as controllable system
 // effects, and publishes live meters for the settings app. Non-real-time callbacks log what the audio
-// engine tells us (mode, endpoint, format) to C:\ProgramData\WebrtcVoiceApo\engine.log.
+// engine tells us (mode, endpoint, format) to the segmented log (see Log.h).
 class CEngineApo final : public CBaseAudioProcessingObject, public IAudioSystemEffects3, public IAudioProcessingObjectNotifications,
                         public IApoAcousticEchoCancellation2, public IApoAuxiliaryInputConfiguration, public IApoAuxiliaryInputRT
 {

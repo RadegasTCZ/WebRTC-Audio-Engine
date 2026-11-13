@@ -100,7 +100,7 @@ namespace
 
     // %ProgramData%\WebrtcAudioEngine, writable by SYSTEM and Administrators only, or empty if that cannot be
     // guaranteed (then nothing is logged). We write there as SYSTEM: a folder an ordinary user could create
-    // or write into would let them redirect the log onto any file (links), like Initialize-LogDir guards against.
+    // or write into would let them redirect the log onto any file (links).
     const std::wstring& LogDir()
     {
         static std::wstring dir = [] {
