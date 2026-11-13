@@ -102,7 +102,12 @@ void VoiceProcessor::OnSettingsChanged(const Settings& s)
     AcquireSRWLockExclusive(&g_registryLock);  // held while rebuilding, so no processor can be destroyed meanwhile
     if (g_registry)
         for (VoiceProcessor* p : *g_registry)
-            p->RequestStageParams(settings::Current(p->m_settingsIndex));  // each processor follows its microphone's settings
+        {
+            // Each processor follows its microphone's settings. Out of memory for a new stage: that processor
+            // keeps its current stages (the lock must be released either way).
+            try { p->RequestStageParams(settings::Current(p->m_settingsIndex)); }
+            catch (...) {}
+        }
     (void)s;
     ReleaseSRWLockExclusive(&g_registryLock);
     if (g_afterSettingsChanged)

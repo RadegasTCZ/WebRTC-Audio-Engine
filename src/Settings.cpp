@@ -24,6 +24,7 @@ namespace
     };
     Snapshot g_snap[1 + settings::kMaxDevices];  // [0] = defaults
     SRWLOCK g_snapLock = SRWLOCK_INIT;            // guards device registration (non-RT only)
+    SRWLOCK g_changeLock = SRWLOCK_INIT;          // one OnChanged at a time (thread-pool callbacks can overlap)
 
     std::atomic<bool> g_watcherStarted{false};
     std::atomic<settings::ChangeHook> g_hook{nullptr};
@@ -151,6 +152,9 @@ namespace
     {
         // Re-arm first, then read: a value written while we read fires the next notification instead of
         // being missed (writers set several values in a row; the first one wakes us up).
+        // Callbacks can overlap (the re-arm above can fire while this one runs): Store() has a single
+        // writer per snapshot, and the hook must see changes in order.
+        AcquireSRWLockExclusive(&g_changeLock);
         Arm();
         bool any = false;
         AcquireSRWLockShared(&g_snapLock);
@@ -171,7 +175,12 @@ namespace
         ReleaseSRWLockShared(&g_snapLock);
         if (any)
             if (auto hook = g_hook.load())
-                hook(settings::Current());
+            {
+                // The hook rebuilds processing stages; out of memory there must not end audiodg.
+                try { hook(settings::Current()); }
+                catch (...) { apolog::Write(L"[settings] out of memory while applying new settings (kept the old ones)"); }
+            }
+        ReleaseSRWLockExclusive(&g_changeLock);
     }
 }
 
@@ -305,9 +314,19 @@ namespace settings
             return;
         }
         g_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        Arm();
+        if (g_event)
+            Arm();
         // Lives for the rest of the process; the DLL is then never unloaded (DllCanUnloadNow).
-        RegisterWaitForSingleObject(&g_wait, g_event, OnChanged, nullptr, INFINITE, WT_EXECUTEDEFAULT);
+        if (!g_event || !RegisterWaitForSingleObject(&g_wait, g_event, OnChanged, nullptr, INFINITE, WT_EXECUTEDEFAULT))
+        {
+            apolog::Write(L"[settings] could not start the live watcher (error %lu): retrying at the next stream", GetLastError());
+            if (g_event) { CloseHandle(g_event); g_event = nullptr; }
+            RegCloseKey(g_key);
+            g_key = nullptr;
+            g_wait = nullptr;
+            g_watcherStarted.store(false);
+            return;
+        }
         apolog::Write(L"[settings] live watcher started");
     }
 }

@@ -230,6 +230,15 @@ STDMETHODIMP CEngineApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
                   ModeName(m_mode), modeGuid, discoveryOnly, endpointName, mmEndpointId, endpointId,
                   m_hardwareVolumeBus ? 1 : 0);
 
+    // The echo reference ring (1 s of mono 48 kHz) is allocated here, once: the reference producer
+    // (AcceptInput) can run while capture is stopped, so the ring must never be (re)allocated later.
+    if (m_ref.Capacity() == 0)
+    {
+        try { m_ref.Init(VoiceProcessor::kSampleRate); }
+        catch (...) { return E_OUTOFMEMORY; }
+    }
+
+    m_discoveryOnly = discoveryOnly == TRUE;
     m_bIsInitialized = true;
     return S_OK;
 }
@@ -356,17 +365,23 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
         {
             const UINT32 maxFrames = std::max(u32NumInputConnections ? ppInputConnections[0]->u32MaxFrameCount : 0u,
                                               u32NumOutputConnections ? ppOutputConnections[0]->u32MaxFrameCount : 0u);
-            // Echo reference attached by AddAuxiliaryInput. If it arrived while the previous stream ran, its ring
-            // could not be allocated then (APOProcess may have been reading it): do it now, before the stream.
-            if (m_refActive.load() && m_ref.Capacity() == 0)
-                m_ref.Init(VoiceProcessor::kSampleRate);
+            // Echo reference attached by AddAuxiliaryInput (its ring was allocated in Initialize).
             m_proc.SetReference(m_refActive.load() ? &m_ref : nullptr);
             // Per-device meters for the tray app (non-RT). Claim again if another device took our slot meanwhile.
             m_telemetryKey = telemetry::KeyOf(m_endpointKey);
             if (!telemetry::Owns(m_telemetry, m_telemetryKey))
                 m_telemetry = telemetry::ClaimSlot(m_endpointKey, m_endpointName, m_deviceGuid);
-            ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(std::lround(fmt.fFramesPerSecond)), s,
-                                static_cast<int>(maxFrames ? maxFrames : 4096));
+            try
+            {
+                ok = m_proc.Prepare(static_cast<int>(m_channels), static_cast<int>(std::lround(fmt.fFramesPerSecond)), s,
+                                    static_cast<int>(maxFrames ? maxFrames : 4096));
+            }
+            catch (...)  // out of memory: pass the audio through untouched instead of ending audiodg
+            {
+                ok = false;
+                m_proc.Deactivate();
+                apolog::Write(L"[%s #%ld] processing off: out of memory while preparing", SlotName(), m_instanceId);
+            }
             apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f%s maxFrames=%u latency=%d frames",
                           SlotName(), m_instanceId, ok ? L"ACTIVE" : L"off (unsupported format)", s.bypass, s.hpfEnabled,
                           s.hpfHz, s.nsEnabled, s.nsLevel, m_channels, fmt.fFramesPerSecond,
@@ -582,15 +597,14 @@ STDMETHODIMP CEngineApo::AddAuxiliaryInput(DWORD dwInputId, UINT32 cbDataSize, B
                       m_refFloat ? L"float" : L"non-float", m_refChannels, m_refRate);
         return E_INVALIDARG;
     }
-    // 1 s of mono reference. The engine adds/removes the reference while we are unlocked (seen in the
-    // logs), but never reallocate or reset the ring under a running stream: APOProcess may be reading it.
-    if (!m_bIsLocked || m_ref.Capacity() == 0)
-    {
-        if (m_bIsLocked)
-            apolog::Write(L"[%s #%ld] AddAuxiliaryInput while locked: echo cancellation starts with the next stream", SlotName(), m_instanceId);
-        else
-            m_ref.Init(VoiceProcessor::kSampleRate);
-    }
+    // The ring was allocated in Initialize and never moves. Empty it for a new reference when no
+    // stream runs; under a running stream leave it alone (APOProcess is reading it).
+    if (m_ref.Capacity() == 0)
+        return E_OUTOFMEMORY;
+    if (!m_bIsLocked)
+        m_ref.Reset();
+    else
+        apolog::Write(L"[%s #%ld] AddAuxiliaryInput while locked: echo cancellation starts with the next stream", SlotName(), m_instanceId);
     m_refInputId = dwInputId;
     m_refFrames = m_refCalls = m_refDropped = m_refSilentCalls = 0;
     m_refActive.store(true);
@@ -766,7 +780,9 @@ STDMETHODIMP CEngineApo::GetApoNotificationRegistrationInfo(APO_NOTIFICATION_DES
         return E_POINTER;
     *apoNotifications = nullptr;
     *count = 0;
-    if (!m_device)
+    // Discovery-only instances never process audio, so they need no slider updates. Each registration also
+    // costs audiodg registry handles that it never gives back (measured 2026-11-13), so skip it there.
+    if (!m_device || m_discoveryOnly)
         return S_OK;  // nothing to register for
     auto* d = static_cast<APO_NOTIFICATION_DESCRIPTOR*>(CoTaskMemAlloc(sizeof(APO_NOTIFICATION_DESCRIPTOR)));
     if (!d)

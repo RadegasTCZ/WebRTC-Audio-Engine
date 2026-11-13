@@ -10,7 +10,11 @@
 class ReferenceRing
 {
 public:
+    // Allocate once, before any producer or consumer can run (it may throw std::bad_alloc).
     void Init(size_t capacity) { m_buf.assign(capacity, 0.0f); m_w.store(0); m_r.store(0); }
+    // Empties the ring without reallocating. Safe against a concurrent producer/consumer in the sense
+    // that the buffer never moves: at worst a few stale samples are read once.
+    void Reset() noexcept { m_r.store(m_w.load(std::memory_order_acquire), std::memory_order_release); }
     size_t Capacity() const noexcept { return m_buf.size(); }
     size_t Available() const noexcept { return m_w.load(std::memory_order_acquire) - m_r.load(std::memory_order_acquire); }
 
