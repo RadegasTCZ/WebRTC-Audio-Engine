@@ -18,6 +18,12 @@ namespace aecconfig
 
     inline const Tuning& ForStrength(unsigned s) { return s == 0 ? kGentle : s == 2 ? kStrong : kNormal; }
 
+    // Room size = echo tail the linear filter covers, in 4 ms AEC3 blocks: small ~52 ms (AEC3's minimum and
+    // default: headsets, laptop speakers), medium ~80 ms (desk speakers), large ~120 ms (big or bare rooms).
+    // Longer filters add no latency but cost CPU in proportion and re-adapt a little slower.
+    inline constexpr int kRoomBlocks[3] = {13, 20, 30};
+    inline int ForRoom(unsigned r) { return kRoomBlocks[r <= 2 ? r : 0]; }
+
     inline float T(float pct) { return std::clamp(pct, 0.0f, 100.0f) / 100.0f; }
     inline float Supp(float p) { return 1.5f - T(p) * 1.49f; }
     inline float HfSupp(float p) { return 0.5f - T(p) * 0.49f; }

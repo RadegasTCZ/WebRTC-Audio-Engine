@@ -389,6 +389,65 @@ int main()
         EXPECT(AllFinite(yOn), "non-finite AEC output");
     }
 
+    std::printf("[12b] room size: a reverberant echo (tail ~150 ms after a 30 ms delay) with small / medium / large filters\n");
+    {
+        Settings st = def; st.nsEnabled = 0; st.hpfEnabled = 0; st.lpfEnabled = 0; st.limiterEnabled = 0; st.agcEnabled = 0;
+        const int n = 48000 * 12;
+        std::mt19937 rng(23);
+        std::normal_distribution<float> g(0.0f, 0.1f);
+        std::vector<float> farEnd(n, 0.0f);
+        for (int f = 0; f < n; ++f) if ((f / 24000) % 5 < 3) farEnd[f] = g(rng);
+        // Room: direct sound after 30 ms, then a reflection every ~1 ms decaying 60 dB over 150 ms (random signs).
+        struct Tap { int delay; float gain; };
+        std::vector<Tap> taps{{1440, 0.5f}};
+        std::uniform_int_distribution<int> jitter(-12, 12);
+        for (int k = 1; k * 48 <= 7200; ++k)
+        {
+            const float decay = std::pow(10.0f, -3.0f * (k * 48) / 7200.0f);  // -60 dB at 150 ms
+            taps.push_back({1440 + k * 48 + jitter(rng), (rng() & 1 ? 0.25f : -0.25f) * decay});
+        }
+        std::vector<float> mic(static_cast<size_t>(kCh) * n, 0.0f);
+        for (int f = 0; f < n; ++f)
+        {
+            float e = 0.0f;
+            for (const Tap& t : taps) if (f >= t.delay) e += t.gain * farEnd[f - t.delay];
+            for (int c = 0; c < kCh; ++c) mic[static_cast<size_t>(f) * kCh + c] = e;
+        }
+        // The suppressor hides almost any residual when nobody talks at the near end, so the output level says
+        // little about the filter length. AEC3's own ERLE (the linear filter's echo reduction) shows how much of
+        // the tail the filter models: that part is removed without touching the near-end voice.
+        auto off = st; off.aecEnabled = 0;
+        const auto yOff = runAec(mic, farEnd, off, true);
+        const size_t e0 = static_cast<size_t>(48000 * 7 + kLat) * kCh, e1 = static_cast<size_t>(48000 * 12) * kCh;
+        const double echoOff = RmsDb(yOff, e0, e1);
+        const char* names[3] = {"small  (13 blocks,  52 ms)", "medium (20 blocks,  80 ms)", "large  (30 blocks, 120 ms)"};
+        double erle[3] = {};
+        for (uint32_t room = 0; room < 3; ++room)
+        {
+            Settings on = st; on.aecRoom = room;
+            ReferenceRing ring;
+            ring.Init(48000);
+            VoiceProcessor vp;
+            vp.SetReference(&ring);
+            vp.Prepare(kCh, 48000, on);
+            std::vector<float> yOn(mic.size());
+            double sum = 0; int count = 0;
+            for (int pos = 0; pos < n; pos += 480)
+            {
+                ring.Write(farEnd.data() + pos, 480);
+                vp.Process(mic.data() + static_cast<size_t>(pos) * kCh, yOn.data() + static_cast<size_t>(pos) * kCh, 480, on);
+                VoiceProcessor::Meters m;
+                if (vp.TakeMeters(m) && pos >= 48000 * 7) { sum += m.echoRemovedDb; ++count; }
+            }
+            erle[room] = count ? sum / count : 0;
+            const double echoOn = RmsDb(yOn, e0, e1);
+            std::printf("    %s: linear filter %5.1f dB, output %5.1f dB removed\n", names[room], erle[room], echoOff - echoOn);
+            EXPECT(echoOff - echoOn > 15.0, "room %u: only %.1f dB echo removal", room, echoOff - echoOn);
+            EXPECT(AllFinite(yOn), "room %u: non-finite AEC output", room);
+        }
+        EXPECT(erle[2] > erle[0] + 1.0, "large room filter not better than small on a long tail (%.1f vs %.1f dB)", erle[2], erle[0]);
+    }
+
     std::printf("[13] stuck / bursty / drifting devices: the echo reference stays bounded and AEC recovers\n");
     {
         // A timeline in "real" 10 ms ticks. The playback device plays `played` (silence while it is stuck)
@@ -519,6 +578,7 @@ int main()
             {
                 s.agcMaxGainDb = 20 + (i % 30);              // AGC2 rebuild
                 s.aecStrength = static_cast<uint32_t>(i % 3); // AEC3 rebuild
+                s.aecRoom = static_cast<uint32_t>((i / 3) % 3);
                 s.nsLevel = static_cast<uint32_t>(i % 4);
                 settings::Publish(s);
                 VoiceProcessor::OnSettingsChanged(s);
@@ -679,6 +739,10 @@ int main()
         };
         Settings all = def; all.aecEnabled = 1; all.nsEnabled = 1; all.agcEnabled = 1; all.limiterEnabled = 1;
         bench("everything on (AEC with speakers)", all, true);
+        Settings medium = all; medium.aecRoom = 1;
+        bench("everything on, medium room", medium, true);
+        Settings large = all; large.aecRoom = 2;
+        bench("everything on, large room", large, true);
         Settings noAec = all; noAec.aecEnabled = 0;
         bench("AEC switched off (reference kept)", noAec, true);
         bench("no speaker reference (no AEC3)", all, false);

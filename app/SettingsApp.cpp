@@ -121,16 +121,20 @@ namespace
     constexpr std::array<AgcPreset, 3> kAgcPresets{{{8, 20, 3, -60}, {5, 30, 6, -50}, {3, 50, 10, -45}}};
 
     // Controls, in keyboard (Tab) order.
-    enum W { W_DEVICE, W_CUSTOM, W_AEC, W_AEC_LVL, W_NS, W_NS_LVL, W_AGC, W_AGC_LVL, W_CLEANUP, W_LIMITER, W_GAIN, W_LINK, W_RESET, W_COUNT };
+    enum W { W_DEVICE, W_CUSTOM, W_AEC, W_AEC_LVL, W_AEC_ROOM, W_NS, W_NS_LVL, W_AGC, W_AGC_LVL, W_CLEANUP, W_LIMITER, W_GAIN, W_LINK, W_RESET, W_COUNT };
+
+    // Rows of the processing card ("Room size" belongs to echo cancellation and sits right under it).
+    enum Row { R_AEC, R_ROOM, R_NS, R_AGC, R_CLEANUP, R_LIMITER, R_COUNT };
 
     // Layout in DIPs (96 dpi), client area kW x kH.
-    constexpr int kW = 440, kH = 556, kPad = 16;
+    constexpr int kW = 440, kH = 600, kPad = 16;
     constexpr int kCardL = 12, kCardR = kW - 12, kRowL = 26, kRowR = kW - 26, kRowH = 44;
-    constexpr int kCardA = 104, kCardB = kCardA + 5 * kRowH + 12 + 12;  // processing card, slider card
+    constexpr int kCardA = 104, kCardB = kCardA + R_COUNT * kRowH + 12 + 12;  // processing card, slider card
     constexpr int kSegL = 192, kSegR = 360;                              // choice next to a switch
     int RowTop(int row) { return kCardA + 6 + row * kRowH; }             // rows of the processing card
 
     const std::vector<std::wstring> kStrength{L"Gentle", L"Normal", L"Strong"};
+    const std::vector<std::wstring> kRoom{L"Small", L"Medium", L"Large"};
     const std::vector<std::wstring> kNsLevels{L"6 dB", L"12 dB", L"18 dB", L"21 dB"};
     const std::vector<std::wstring> kCleanup{L"Rumble <80 Hz", L"Hiss >10 kHz"};
     const std::vector<std::wstring> kGainModes{L"Auto", L"Always", L"Never"};
@@ -182,14 +186,15 @@ namespace
         {
         case W_DEVICE: return Sr(kPad, 34, 290, 70);
         case W_CUSTOM: return ui::SwitchRect(Sr(300, 34, kW - kPad, 70), g_dpi);
-        case W_AEC: return ui::SwitchRect(RowRect(0), g_dpi);
-        case W_AEC_LVL: return SegRect(0);
-        case W_NS: return ui::SwitchRect(RowRect(1), g_dpi);
-        case W_NS_LVL: return SegRect(1);
-        case W_AGC: return ui::SwitchRect(RowRect(2), g_dpi);
-        case W_AGC_LVL: return SegRect(2);
-        case W_CLEANUP: return SegRect(3, kSegL, kRowR);
-        case W_LIMITER: return ui::SwitchRect(RowRect(4), g_dpi);
+        case W_AEC: return ui::SwitchRect(RowRect(R_AEC), g_dpi);
+        case W_AEC_LVL: return SegRect(R_AEC);
+        case W_AEC_ROOM: return SegRect(R_ROOM);
+        case W_NS: return ui::SwitchRect(RowRect(R_NS), g_dpi);
+        case W_NS_LVL: return SegRect(R_NS);
+        case W_AGC: return ui::SwitchRect(RowRect(R_AGC), g_dpi);
+        case W_AGC_LVL: return SegRect(R_AGC);
+        case W_CLEANUP: return SegRect(R_CLEANUP, kSegL, kRowR);
+        case W_LIMITER: return ui::SwitchRect(RowRect(R_LIMITER), g_dpi);
         case W_GAIN: { RECT r = GainRow(); return {S(kSegL), r.top + S(8), r.right, r.bottom - S(8)}; }
         case W_LINK: return Sr(kPad, kH - 74, 200, kH - 42);
         case W_RESET: return Sr(kW - kPad - 150, kH - 74, kW - kPad, kH - 42);
@@ -199,7 +204,7 @@ namespace
     // Clicking a row's name also flips its switch.
     bool HitToggleRow(int w, POINT p)
     {
-        const int row = w == W_AEC ? 0 : w == W_NS ? 1 : w == W_AGC ? 2 : w == W_LIMITER ? 4 : -1;
+        const int row = w == W_AEC ? R_AEC : w == W_NS ? R_NS : w == W_AGC ? R_AGC : w == W_LIMITER ? R_LIMITER : -1;
         if (row < 0) return false;
         RECT r = RowRect(row);
         RECT name{r.left, r.top, w == W_LIMITER ? ControlRect(w).left : S(kSegL - 8), r.bottom};
@@ -216,7 +221,7 @@ namespace
         case W_DEVICE: case W_LINK: return true;
         case W_CUSTOM: return SelectedGuid() != nullptr;
         case W_AEC: case W_NS: case W_AGC: case W_CLEANUP: case W_LIMITER: case W_RESET: return Editable();
-        case W_AEC_LVL: return Editable() && s.aecEnabled;
+        case W_AEC_LVL: case W_AEC_ROOM: return Editable() && s.aecEnabled;
         case W_NS_LVL: return Editable() && s.nsEnabled;
         case W_AGC_LVL: return Editable() && s.agcEnabled;
         case W_GAIN: return Editable() && !s.agcEnabled;
@@ -312,6 +317,7 @@ namespace
         case W_AGC: Change([](Settings& s) { s.agcEnabled = !s.agcEnabled; }); break;
         case W_LIMITER: Change([](Settings& s) { s.limiterEnabled = !s.limiterEnabled; }); break;
         case W_AEC_LVL: if (segment >= 0) Change([=](Settings& s) { s.aecStrength = static_cast<uint32_t>(segment); }); break;
+        case W_AEC_ROOM: if (segment >= 0) Change([=](Settings& s) { s.aecRoom = static_cast<uint32_t>(segment); }); break;
         case W_NS_LVL: if (segment >= 0) Change([=](Settings& s) { s.nsLevel = static_cast<uint32_t>(segment); }); break;
         case W_GAIN: if (segment >= 0) Change([=](Settings& s) { s.gainMode = static_cast<uint32_t>(segment); }); break;
         case W_AGC_LVL:
@@ -346,6 +352,7 @@ namespace
         switch (w)
         {
         case W_AEC_LVL: return static_cast<int>(s.aecStrength);
+        case W_AEC_ROOM: return static_cast<int>(s.aecRoom);
         case W_NS_LVL: return static_cast<int>(s.nsLevel);
         case W_AGC_LVL: return MatchAgcPreset(s);
         case W_GAIN: return static_cast<int>(s.gainMode);
@@ -392,13 +399,13 @@ namespace
                  Sr(kPad, 74, kW - kPad, 96), t.subtle);
 
         // Processing card.
-        ui::FillRound(dc, Sr(kCardL, kCardA, kCardR, kCardA + 5 * kRowH + 12), S(8), t.card);
+        ui::FillRound(dc, Sr(kCardL, kCardA, kCardR, kCardA + R_COUNT * kRowH + 12), S(8), t.card);
         auto rowName = [&](int row, const wchar_t* name, int right = kSegL - 8) {
             SelectObject(dc, body);
             RECT r = RowRect(row);
             r.right = S(right);
             ui::Text(dc, name, r, edit ? t.text : t.disabled);
-            if (row > 0)
+            if (row > 0 && row != R_ROOM)  // no line between echo cancellation and its room size
             {
                 RECT line{RowRect(row).left, RowRect(row).top, RowRect(row).right, RowRect(row).top + 1};
                 HBRUSH b = CreateSolidBrush(t.line);
@@ -406,21 +413,30 @@ namespace
                 DeleteObject(b);
             }
         };
-        rowName(0, L"Echo cancellation");
+        rowName(R_AEC, L"Echo cancellation");
         ui::DrawSegmented(dc, ControlRect(W_AEC_LVL), kStrength, SegValue(W_AEC_LVL), Enabled(W_AEC_LVL), false, smallFont, t, g_dpi);
         ui::DrawSwitch(dc, ControlRect(W_AEC), s.aecEnabled, edit, t, g_dpi);
-        rowName(1, L"Noise suppression");
+        {
+            // Sub-row of echo cancellation: indented, greyed out while echo cancellation is off.
+            SelectObject(dc, smallFont);
+            RECT r = RowRect(R_ROOM);
+            r.left += S(14);
+            r.right = S(kSegL - 8);
+            ui::Text(dc, L"Room size", r, Enabled(W_AEC_ROOM) ? t.subtle : t.disabled, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            ui::DrawSegmented(dc, ControlRect(W_AEC_ROOM), kRoom, SegValue(W_AEC_ROOM), Enabled(W_AEC_ROOM), false, smallFont, t, g_dpi);
+        }
+        rowName(R_NS, L"Noise suppression");
         ui::DrawSegmented(dc, ControlRect(W_NS_LVL), kNsLevels, SegValue(W_NS_LVL), Enabled(W_NS_LVL), false, smallFont, t, g_dpi);
         ui::DrawSwitch(dc, ControlRect(W_NS), s.nsEnabled, edit, t, g_dpi);
-        rowName(2, L"Automatic gain");
+        rowName(R_AGC, L"Automatic gain");
         ui::DrawSegmented(dc, ControlRect(W_AGC_LVL), kStrength, SegValue(W_AGC_LVL), Enabled(W_AGC_LVL), false, smallFont, t, g_dpi);
         ui::DrawSwitch(dc, ControlRect(W_AGC), s.agcEnabled, edit, t, g_dpi);
-        rowName(3, L"Cleanup filters");
+        rowName(R_CLEANUP, L"Cleanup filters");
         ui::DrawSegmented(dc, ControlRect(W_CLEANUP), kCleanup, (s.hpfEnabled ? 1 : 0) | (s.lpfEnabled ? 2 : 0), edit, true, smallFont, t, g_dpi);
-        rowName(4, L"Limiter", 120);
+        rowName(R_LIMITER, L"Limiter", 120);
         {
             SelectObject(dc, smallFont);
-            RECT d = RowRect(4);
+            RECT d = RowRect(R_LIMITER);
             d.left = S(120);
             d.right = ControlRect(W_LIMITER).left - S(12);
             ui::Text(dc, L"keeps peaks below \x2212" L"1 dBFS", d, edit ? t.subtle : t.disabled, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -487,7 +503,7 @@ namespace
     int HitTest(POINT p, int* segment)
     {
         *segment = -1;
-        for (int w : {W_DEVICE, W_AEC_LVL, W_NS_LVL, W_AGC_LVL, W_CLEANUP, W_GAIN, W_LINK, W_RESET})
+        for (int w : {W_DEVICE, W_AEC_LVL, W_AEC_ROOM, W_NS_LVL, W_AGC_LVL, W_CLEANUP, W_GAIN, W_LINK, W_RESET})
         {
             const RECT r = ControlRect(w);
             if (PtInRect(&r, p))
@@ -519,7 +535,7 @@ namespace
         if (ui::ListOpen()) { ui::ListKey(vk); return; }
         if (!Enabled(g_focus)) MoveFocus(+1);
         const bool shift = GetKeyState(VK_SHIFT) < 0;
-        const bool seg = g_focus == W_AEC_LVL || g_focus == W_NS_LVL || g_focus == W_AGC_LVL || g_focus == W_GAIN;
+        const bool seg = g_focus == W_AEC_LVL || g_focus == W_AEC_ROOM || g_focus == W_NS_LVL || g_focus == W_AGC_LVL || g_focus == W_GAIN;
         switch (vk)
         {
         case VK_TAB: MoveFocus(shift ? -1 : +1); return;

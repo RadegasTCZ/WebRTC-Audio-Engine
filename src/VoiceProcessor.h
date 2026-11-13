@@ -185,6 +185,7 @@ private:
     Handoff<AecInstance> m_aecHandoff;
     std::atomic<bool> m_hasAec{false};            // m_aec != nullptr, readable from the watcher thread
     uint32_t m_aecStrengthRequested = 1;
+    uint32_t m_aecRoomRequested = 0;
     ReferenceRing* m_refRing = nullptr;
     uint64_t m_refUnderruns = 0;
 

@@ -27,6 +27,7 @@ struct Settings
     uint32_t limiterEnabled = 1;    // -1 dBFS safety limiter, last in the chain
     uint32_t aecEnabled = 1;        // WebRTC AEC3 (Communications streams with an echo reference)
     uint32_t aecStrength = 1;       // 0 = gentle, 1 = normal, 2 = strong (AEC3-Echo-Canceller presets)
+    uint32_t aecRoom = 0;           // echo tail: 0 = small (13 blocks), 1 = medium (20), 2 = large (30)
 
     bool operator==(const Settings&) const = default;
 

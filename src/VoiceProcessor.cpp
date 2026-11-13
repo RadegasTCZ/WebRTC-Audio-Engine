@@ -20,10 +20,10 @@ static_assert(VoiceProcessor::kAecLatency % 3 == 0, "AEC stand-in delays each 16
 
 struct VoiceProcessor::AecInstance
 {
-    explicit AecInstance(unsigned strength)
+    AecInstance(unsigned strength, unsigned room)
     {
         const auto env = webrtc::CreateEnvironment();
-        webrtc::EchoCanceller3Factory factory(aecconfig::Build(aecconfig::ForStrength(strength)));
+        webrtc::EchoCanceller3Factory factory(aecconfig::Build(aecconfig::ForStrength(strength), aecconfig::ForRoom(room)));
         controller = factory.Create(env, kSampleRate, 1, 1);
     }
     std::unique_ptr<webrtc::EchoControl> controller;
@@ -122,10 +122,11 @@ void VoiceProcessor::RequestStageParams(const Settings& s)
         m_agcHandoff.Offer(new AgcStage(want, m_agcGainDb.load(std::memory_order_relaxed)));  // keep the learnt gain
         m_agcRequested = want;
     }
-    if (m_hasAec.load() && s.aecStrength != m_aecStrengthRequested)
+    if (m_hasAec.load() && (s.aecStrength != m_aecStrengthRequested || s.aecRoom != m_aecRoomRequested))
     {
-        m_aecHandoff.Offer(new AecInstance(s.aecStrength));
+        m_aecHandoff.Offer(new AecInstance(s.aecStrength, s.aecRoom));
         m_aecStrengthRequested = s.aecStrength;
+        m_aecRoomRequested = s.aecRoom;
     }
 }
 
@@ -299,7 +300,8 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
 
     m_aecHandoff.Clear();
     m_aecStrengthRequested = initial.aecStrength;
-    m_aec = m_refRing ? std::make_unique<AecInstance>(initial.aecStrength) : nullptr;
+    m_aecRoomRequested = initial.aecRoom;
+    m_aec = m_refRing ? std::make_unique<AecInstance>(initial.aecStrength, initial.aecRoom) : nullptr;
     m_hasAec.store(m_aec != nullptr);
     m_refUnderruns = 0;
 

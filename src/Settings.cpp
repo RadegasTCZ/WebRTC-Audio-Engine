@@ -108,6 +108,7 @@ namespace
         read(L"LimiterEnabled", s.limiterEnabled);
         read(L"AecEnabled", s.aecEnabled);
         read(L"AecStrength", s.aecStrength);
+        read(L"AecRoom", s.aecRoom);
     }
 
     Settings Sanitised(Settings s) noexcept
@@ -124,6 +125,7 @@ namespace
         if (s.nsLevel > 3) s.nsLevel = 1;
         if (s.gainMode > 2) s.gainMode = 0;
         if (s.aecStrength > 2) s.aecStrength = 1;
+        if (s.aecRoom > 2) s.aecRoom = 0;
         s.agcHeadroomDb = std::clamp(s.agcHeadroomDb, 0, 20);
         s.agcMaxGainDb = std::clamp(s.agcMaxGainDb, 1, 50);
         s.agcSpeedDbPerSec = std::clamp(s.agcSpeedDbPerSec, 1, 30);
@@ -133,10 +135,10 @@ namespace
 
     void Log(const wchar_t* who, const Settings& s) noexcept
     {
-        apolog::Write(L"[settings %s] bypass=%u lpf=%u@%uHz hpf=%u@%uHz ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u aec=%u strength=%u",
+        apolog::Write(L"[settings %s] bypass=%u lpf=%u@%uHz hpf=%u@%uHz ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u aec=%u strength=%u room=%u",
                       who, s.bypass, s.lpfEnabled, s.lpfHz, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel, s.gainMode, s.agcEnabled,
                       s.agcHeadroomDb, s.agcMaxGainDb, s.agcSpeedDbPerSec, s.agcNoiseCeilingDbfs, s.limiterEnabled, s.aecEnabled,
-                      s.aecStrength);
+                      s.aecStrength, s.aecRoom);
     }
 
     void Arm() noexcept
@@ -235,6 +237,7 @@ LONG Settings::WriteToRegistry(const Settings& s, const wchar_t* device) noexcep
     put(L"LimiterEnabled", s.limiterEnabled);
     put(L"AecEnabled", s.aecEnabled);
     put(L"AecStrength", s.aecStrength);
+    put(L"AecRoom", s.aecRoom);
     RegCloseKey(key);
     return err;
 }
