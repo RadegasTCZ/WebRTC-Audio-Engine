@@ -212,4 +212,37 @@ namespace apolog
         }
         ReleaseSRWLockExclusive(&g_lock);
     }
+
+    bool WriteDiagFile(const wchar_t* name, const void* data, size_t bytes, wchar_t (&pathOut)[MAX_PATH]) noexcept
+    {
+        pathOut[0] = L'\0';
+        if (!name || wcschr(name, L'\\') || wcschr(name, L'/'))
+            return false;
+        AcquireSRWLockExclusive(&g_lock);
+        if (g_dirState < 0)
+            g_dirState = PrepareDir() ? 1 : 0;
+        bool ok = false;
+        if (g_dirState == 1 && SUCCEEDED(StringCchPrintfW(pathOut, MAX_PATH, L"%s\\%s", g_dir, name)))
+        {
+            // CREATE_NEW + never follow a link (same rules as the log).
+            HANDLE h = CreateFileW(pathOut, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW,
+                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            if (h != INVALID_HANDLE_VALUE)
+            {
+                const BYTE* p = static_cast<const BYTE*>(data);
+                ok = true;
+                while (ok && bytes > 0)
+                {
+                    const DWORD chunk = static_cast<DWORD>(std::min<size_t>(bytes, 1u << 24));
+                    DWORD written = 0;
+                    ok = WriteFile(h, p, chunk, &written, nullptr) && written == chunk;
+                    p += chunk;
+                    bytes -= chunk;
+                }
+                CloseHandle(h);
+            }
+        }
+        ReleaseSRWLockExclusive(&g_lock);
+        return ok;
+    }
 }

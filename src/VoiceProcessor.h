@@ -74,8 +74,16 @@ public:
         float inputDbfs = -120, outputDbfs = -120, referenceDbfs = -120;
         float echoRemovedDb = 0, agcGainDb = 0, limiterDb = 0;
         float speech = 0;  // mean speech probability (AGC2 voice detector, runs even when AGC is off)
+        int aecDelayMs = -1;  // AEC3's own estimate of the echo delay (reference -> microphone); -1 = no AEC3
         bool aecRunning = false;
     };
+
+    // Diagnostics: records the last `seconds` of exactly what AEC3 receives (capture after the cleanup
+    // filters, and the echo reference), 48 kHz, interleaved pairs. Arm before Prepare (allocates, non-RT);
+    // the real-time thread fills a ring. TakeDump (non-RT, after the stream stopped) returns the pairs
+    // oldest first.
+    void ArmDump(int seconds) { m_dump.assign(static_cast<size_t>(seconds) * kSampleRate * 2, 0.0f); m_dumpPos = 0; m_dumpFull = false; }
+    std::vector<float> TakeDump();
     bool TakeMeters(Meters& out) noexcept
     {
         if (!m_metersReady) return false;
@@ -204,6 +212,9 @@ private:
 
     Meters m_meters{};
     bool m_metersReady = false;
+    std::vector<float> m_dump;   // diagnostics ring (empty = off)
+    size_t m_dumpPos = 0;
+    bool m_dumpFull = false;
     int m_meterBlocks = 0;
     double m_inSq = 0, m_outSq = 0, m_refSq = 0;
     float m_limPeakDb = 0;

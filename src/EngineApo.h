@@ -118,6 +118,11 @@ private:
     bool IsAecCandidate() const noexcept;   // Pack slot + COMMUNICATIONS mode
     ReferenceRing m_ref;
     EchoTimeline m_echoTimeline;        // echo removed per 10 s, written to the log when the stream stops
+    // Diagnostics: AEC3's echo-delay estimate, one value per 10 s (RT-written, logged at stop).
+    static constexpr int kDelaySteps = 360;  // 1 hour
+    int16_t m_delaySteps[kDelaySteps] = {};
+    int m_delayCount = 0, m_delayMeters = 0;
+    bool m_dumpArmed = false;           // registry DiagDumpSeconds > 0 at stream start
     std::atomic<bool> m_refActive{false};
     DWORD m_refInputId = 0;
     UINT32 m_refChannels = 0;

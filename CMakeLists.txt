@@ -102,3 +102,12 @@ target_link_libraries(CaptureTest PRIVATE ole32 uuid settings_core)
 add_executable(PathProbe tests/PathProbe.cpp)
 target_compile_definitions(PathProbe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(PathProbe PRIVATE ole32 uuid settings_core)
+
+# Real sample clock of every audio device vs the PC timer and vs each other (drift the echo canceller
+# must follow), plus lost-audio detection. Speakers play digital silence.
+add_executable(ClockProbe tests/ClockProbe.cpp)
+target_compile_definitions(ClockProbe PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(ClockProbe PRIVATE ole32)
+
+# Echo timing in an aecdump WAV (DiagDumpSeconds): does the echo arrive after the reference?
+add_executable(AecDumpXcorr tests/AecDumpXcorr.cpp)

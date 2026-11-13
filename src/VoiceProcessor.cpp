@@ -130,6 +130,25 @@ void VoiceProcessor::RequestStageParams(const Settings& s)
     }
 }
 
+std::vector<float> VoiceProcessor::TakeDump()
+{
+    std::vector<float> out;
+    if (m_dump.empty())
+        return out;
+    if (m_dumpFull)
+    {
+        out.assign(m_dump.begin() + static_cast<std::ptrdiff_t>(m_dumpPos), m_dump.end());
+        out.insert(out.end(), m_dump.begin(), m_dump.begin() + static_cast<std::ptrdiff_t>(m_dumpPos));
+    }
+    else
+        out.assign(m_dump.begin(), m_dump.begin() + static_cast<std::ptrdiff_t>(m_dumpPos));
+    m_dump.clear();
+    m_dump.shrink_to_fit();
+    m_dumpPos = 0;
+    m_dumpFull = false;
+    return out;
+}
+
 // ------------------------------------------------------------------ resampling (non-48 kHz devices)
 
 namespace
@@ -428,6 +447,16 @@ void VoiceProcessor::ProcessBlock() noexcept
         }
         if (!have) { m_ref.fill(0.0f); ++m_refUnderruns; }
         if (!m_settings.aecEnabled) m_ref.fill(0.0f);
+        if (!m_dump.empty())  // diagnostics: what AEC3 sees (capture, reference), no allocation
+        {
+            for (int i = 0; i < kBlock; ++i)
+            {
+                m_dump[m_dumpPos] = m_s1[i];
+                m_dump[m_dumpPos + 1] = m_ref[i];
+                m_dumpPos += 2;
+                if (m_dumpPos >= m_dump.size()) { m_dumpPos = 0; m_dumpFull = true; }
+            }
+        }
         Load(*m_render, m_ref.data());
         m_render->SplitIntoFrequencyBands();
         m_aec->controller->AnalyzeRender(m_render.get());
@@ -510,7 +539,17 @@ void VoiceProcessor::ProcessBlock() noexcept
         m_meters.outputDbfs = db(m_outSq);
         m_meters.referenceDbfs = m_aec ? db(m_refSq) : -120.0f;
         m_meters.aecRunning = m_aec != nullptr && m_settings.aecEnabled;
-        m_meters.echoRemovedDb = m_aec ? static_cast<float>(m_aec->controller->GetMetrics().echo_return_loss_enhancement) : 0.0f;
+        if (m_aec)
+        {
+            const auto metrics = m_aec->controller->GetMetrics();
+            m_meters.echoRemovedDb = static_cast<float>(metrics.echo_return_loss_enhancement);
+            m_meters.aecDelayMs = metrics.delay_ms;
+        }
+        else
+        {
+            m_meters.echoRemovedDb = 0.0f;
+            m_meters.aecDelayMs = -1;
+        }
         m_meters.agcGainDb = m_settings.agcEnabled ? m_agc->LastGainDb() : 0.0f;
         m_meters.limiterDb = m_settings.limiterEnabled ? m_limPeakDb : 0.0f;
         m_meters.speech = m_speechSum / 10.0f;

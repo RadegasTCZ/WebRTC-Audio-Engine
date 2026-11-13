@@ -326,6 +326,8 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
     m_isFloat32 = IsEqualGUID(fmt.guidFormatType, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) && fmt.dwBytesPerSampleContainer == 4;
     ResetStats();
     m_echoTimeline.Reset();
+    m_delayCount = m_delayMeters = 0;
+    m_dumpArmed = false;
     m_lockTick = GetTickCount64();
 
     m_proc.Deactivate();
@@ -382,6 +384,24 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
                 m_proc.Deactivate();
                 apolog::Write(L"[%s #%ld] processing off: out of memory while preparing", SlotName(), m_instanceId);
             }
+            if (ok && m_proc.HasAec())
+            {
+                // Diagnostics, off unless asked for: HKLM\SOFTWARE\WebrtcVoiceApo\DiagDumpSeconds = 1..120 records
+                // the last N seconds of what AEC3 receives; written next to the log when the stream stops.
+                DWORD secs = 0, size = sizeof(secs);
+                if (RegGetValueW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, L"DiagDumpSeconds", RRF_RT_REG_DWORD, nullptr, &secs,
+                                 &size) == ERROR_SUCCESS && secs > 0)
+                {
+                    try
+                    {
+                        m_proc.ArmDump(static_cast<int>(std::min<DWORD>(secs, 120)));
+                        m_dumpArmed = true;
+                        apolog::Write(L"[%s #%ld] diagnostics: recording the last %lu s of AEC3 input (written at stream stop)",
+                                      SlotName(), m_instanceId, std::min<DWORD>(secs, 120));
+                    }
+                    catch (...) { apolog::Write(L"[%s #%ld] diagnostics: out of memory, no recording", SlotName(), m_instanceId); }
+                }
+            }
             apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f%s maxFrames=%u latency=%d frames",
                           SlotName(), m_instanceId, ok ? L"ACTIVE" : L"off (unsupported format)", s.bypass, s.hpfEnabled,
                           s.hpfHz, s.nsEnabled, s.nsLevel, m_channels, fmt.fFramesPerSecond,
@@ -419,6 +439,53 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
     }
     if (m_proc.HasAec() && m_echoTimeline.HasData())
         m_echoTimeline.Report([this](const char* line) { apolog::Write(L"[%s #%ld] %hs", SlotName(), m_instanceId, line); });
+    if (m_delayCount > 0)
+    {
+        // AEC3's echo-delay estimate per 10 s, 30 values (5 minutes) per line.
+        for (int start = 0; start < m_delayCount; start += 30)
+        {
+            wchar_t line[400] = L"";
+            size_t used = 0;
+            for (int i = start; i < std::min(m_delayCount, start + 30); ++i)
+            {
+                const int n = swprintf_s(line + used, std::size(line) - used, L" %d", static_cast<int>(m_delaySteps[i]));
+                if (n > 0) used += static_cast<size_t>(n);
+            }
+            apolog::Write(L"[%s #%ld] AEC3 delay estimate ms per 10 s from %02d:%02d:%s", SlotName(), m_instanceId, start / 6,
+                          (start % 6) * 10, line);
+        }
+    }
+    if (m_dumpArmed)
+    {
+        m_dumpArmed = false;
+        try
+        {
+            const std::vector<float> pairs = m_proc.TakeDump();
+            if (!pairs.empty())
+            {
+                // WAV, float32, 48 kHz, 2 channels: left = microphone (what AEC3 gets), right = echo reference.
+                const uint32_t dataBytes = static_cast<uint32_t>(pairs.size() * sizeof(float));
+                std::vector<uint8_t> wav(44 + dataBytes);
+                auto put32 = [&](size_t at, uint32_t v) { std::memcpy(&wav[at], &v, 4); };
+                auto put16 = [&](size_t at, uint16_t v) { std::memcpy(&wav[at], &v, 2); };
+                std::memcpy(&wav[0], "RIFF", 4); put32(4, 36 + dataBytes); std::memcpy(&wav[8], "WAVEfmt ", 8);
+                put32(16, 16); put16(20, 3 /*IEEE float*/); put16(22, 2); put32(24, 48000); put32(28, 48000 * 8);
+                put16(32, 8); put16(34, 32); std::memcpy(&wav[36], "data", 4); put32(40, dataBytes);
+                std::memcpy(&wav[44], pairs.data(), dataBytes);
+                SYSTEMTIME t;
+                GetLocalTime(&t);
+                wchar_t name[96], path[MAX_PATH];
+                swprintf_s(name, L"aecdump-%04u%02u%02u_%02u%02u%02u-%ld.wav", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
+                           t.wSecond, m_instanceId);
+                if (apolog::WriteDiagFile(name, wav.data(), wav.size(), path))
+                    apolog::Write(L"[%s #%ld] diagnostics: wrote %.1f s of AEC3 input (L = mic, R = reference) to %s", SlotName(),
+                                  m_instanceId, pairs.size() / 2 / 48000.0, path);
+                else
+                    apolog::Write(L"[%s #%ld] diagnostics: could not write the recording", SlotName(), m_instanceId);
+            }
+        }
+        catch (...) { apolog::Write(L"[%s #%ld] diagnostics: out of memory while writing the recording", SlotName(), m_instanceId); }
+    }
     const double peakDb = m_peak > 0.0f ? 20.0 * std::log10(static_cast<double>(m_peak)) : -999.0;
     apolog::Write(L"[%s #%ld] UnlockForProcess mode=%s after %.1f s: calls=%llu validFrames=%llu silentCalls=%llu period=%u..%u frames peak=%.1f dBFS underruns=%llu",
                   SlotName(), m_instanceId, ModeName(m_mode), seconds, m_processCalls, m_validFrames, m_silentCalls,
@@ -461,6 +528,12 @@ STDMETHODIMP_(void) CEngineApo::APOProcess(UINT32 u32NumInputConnections, APO_CO
         if (m_proc.TakeMeters(mt))  // every 100 ms
         {
             m_echoTimeline.Add(mt.echoRemovedDb, mt.referenceDbfs, mt.aecRunning);
+            if (mt.aecDelayMs >= 0 && ++m_delayMeters >= 100)  // one value per 10 s
+            {
+                m_delayMeters = 0;
+                if (m_delayCount < kDelaySteps)
+                    m_delaySteps[m_delayCount++] = static_cast<int16_t>(std::min(mt.aecDelayMs, 32767));
+            }
             if (m_telemetry)
             {
                 telemetry::Values d{};
