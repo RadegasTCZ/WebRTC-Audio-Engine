@@ -24,7 +24,6 @@ namespace
     constexpr UINT_PTR kMeterTimer = 1, kTipTimer = 2;
     constexpr UINT kTipDelayMs = 400;
     enum MenuCmd : UINT { CMD_OPEN = 1, CMD_EXIT };
-    constexpr wchar_t kPrefsKey[] = L"Software\\WebrtcAudioEngine";  // per user: the flyout's microphone
 
     HINSTANCE g_inst = nullptr;
     HWND g_flyout = nullptr;
@@ -85,24 +84,6 @@ namespace
     std::vector<app::Mic> g_mics;
     std::wstring g_micGuid;  // the flyout's microphone; empty = none uses the effect pack (defaults shown)
 
-    std::wstring LoadPreferredMic()
-    {
-        wchar_t v[128] = L"";
-        DWORD size = sizeof(v);
-        if (RegGetValueW(HKEY_CURRENT_USER, kPrefsKey, L"FlyoutMic", RRF_RT_REG_SZ, nullptr, v, &size) != ERROR_SUCCESS) return L"";
-        return v;
-    }
-    void SavePreferredMic(const std::wstring& guid)
-    {
-        HKEY k = nullptr;
-        if (RegCreateKeyExW(HKEY_CURRENT_USER, kPrefsKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) == ERROR_SUCCESS)
-        {
-            RegSetValueExW(k, L"FlyoutMic", 0, REG_SZ, reinterpret_cast<const BYTE*>(guid.c_str()),
-                           static_cast<DWORD>((guid.size() + 1) * sizeof(wchar_t)));
-            RegCloseKey(k);
-        }
-    }
-
     int MicIndex(const std::wstring& guid)
     {
         for (size_t i = 0; i < g_mics.size(); ++i)
@@ -110,14 +91,12 @@ namespace
         return -1;
     }
 
-    // Refreshes the list and keeps the choice: the current one, else the remembered one, else the Windows
-    // default microphone, else one that is recording, else the first.
-    void RefreshMics()
+    // Refreshes the list. The flyout opens on the Windows default microphone (toDefault); a pick in the
+    // flyout lasts only while it stays open. Fallbacks: one that is recording, else the first.
+    void RefreshMics(bool toDefault = false)
     {
         g_mics = app::FindMics();
-        if (MicIndex(g_micGuid) >= 0) return;
-        g_micGuid = LoadPreferredMic();
-        if (MicIndex(g_micGuid) >= 0) return;
+        if (!toDefault && MicIndex(g_micGuid) >= 0) return;
         g_micGuid = app::DefaultMicGuid();
         if (MicIndex(g_micGuid) >= 0) return;
         telemetry::Device live[telemetry::kMaxSlots];
@@ -382,7 +361,6 @@ namespace
     {
         if (i < 0 || i >= static_cast<int>(g_mics.size())) return;
         g_micGuid = g_mics[static_cast<size_t>(i)].guid;
-        SavePreferredMic(g_micGuid);
         ReloadSettings();
         g_speech = false;
         ReadLive();
@@ -416,7 +394,7 @@ namespace
 
     void ShowFlyout()
     {
-        RefreshMics();
+        RefreshMics(true);
         ReloadSettings();
         ReadLive();
         g_focus = F_MIC;
