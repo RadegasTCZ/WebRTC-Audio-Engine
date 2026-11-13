@@ -21,7 +21,7 @@ namespace
 {
     constexpr UINT WM_TRAY = WM_APP + 1;
     constexpr UINT kTrayId = 1;
-    constexpr UINT_PTR kMeterTimer = 1, kTipTimer = 2;
+    constexpr UINT_PTR kMeterTimer = 1, kTipTimer = 2, kAddIconTimer = 3;
     constexpr UINT kTipDelayMs = 400;
     enum MenuCmd : UINT { CMD_OPEN = 1, CMD_EXIT };
 
@@ -33,6 +33,15 @@ namespace
     ULONGLONG g_hiddenAt = 0;  // a click on the tray icon right after the flyout lost focus should not reopen it
 
     // ---------------------------------------------------------------- tray icon (drawn at runtime)
+
+    // The taskbar follows the Windows mode (SystemUsesLightTheme), which can differ from the app mode.
+    bool TaskbarIsDark()
+    {
+        DWORD v = 0, size = sizeof(v);
+        RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", L"SystemUsesLightTheme",
+                     RRF_RT_REG_DWORD, nullptr, &v, &size);
+        return v == 0;
+    }
 
     HICON MakeIcon(int size)
     {
@@ -54,7 +63,7 @@ namespace
             return nullptr;  // no icon this time (out of GDI resources); the tray keeps working
         }
         // Plain bars in the taskbar's text color (no tile: tray icons are monochrome on Windows 11).
-        glyph::Render(size, static_cast<uint32_t*>(bits), ui::IsDark() ? 0xFFFFFF : 0x202020);
+        glyph::Render(size, static_cast<uint32_t*>(bits), TaskbarIsDark() ? 0xFFFFFF : 0x202020);
         HBITMAP mask = CreateBitmap(size, size, 1, 1, nullptr);
         ICONINFO ii{TRUE, 0, 0, mask, color};
         HICON icon = CreateIconIndirect(&ii);
@@ -63,10 +72,22 @@ namespace
         return icon;
     }
 
+    // Redraws the icon image for the current theme / DPI. Keeps the old image if drawing fails.
+    void UpdateIconImage()
+    {
+        if (HICON icon = MakeIcon(GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem())))
+        {
+            if (g_icon) DestroyIcon(g_icon);
+            g_icon = icon;
+        }
+    }
+
+    // Adds the tray icon. At sign-in Explorer may be too busy and NIM_ADD times out without a later
+    // TaskbarCreated, so a failure retries every 2 s for up to 5 minutes.
+    int g_addTries = 0;
     void AddTrayIcon()
     {
-        if (g_icon) DestroyIcon(g_icon);
-        g_icon = MakeIcon(GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()));
+        UpdateIconImage();
         g_nid = {sizeof(g_nid)};
         g_nid.hWnd = g_flyout;
         g_nid.uID = kTrayId;
@@ -74,7 +95,15 @@ namespace
         g_nid.uCallbackMessage = WM_TRAY;
         g_nid.hIcon = g_icon;
         wcscpy_s(g_nid.szTip, L"WebRTC Audio Engine");
-        Shell_NotifyIconW(NIM_ADD, &g_nid);
+        // A timed-out NIM_ADD can still have added the icon: then NIM_MODIFY succeeds.
+        if (!Shell_NotifyIconW(NIM_ADD, &g_nid) && !Shell_NotifyIconW(NIM_MODIFY, &g_nid))
+        {
+            if (++g_addTries <= 150)
+                SetTimer(g_flyout, kAddIconTimer, 2000, nullptr);
+            return;
+        }
+        KillTimer(g_flyout, kAddIconTimer);
+        g_addTries = 0;
         g_nid.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIconW(NIM_SETVERSION, &g_nid);
     }
@@ -525,6 +554,7 @@ namespace
                 if (g_focus == F_MIC)
                 {
                     RefreshMics();
+                    if (g_mics.empty()) break;
                     PickMic(std::clamp(MicIndex(g_micGuid) + (wp == VK_DOWN ? 1 : -1), 0, static_cast<int>(g_mics.size()) - 1));
                 }
                 break;
@@ -533,6 +563,12 @@ namespace
             return 0;
         case WM_TIMER:
         {
+            if (wp == kAddIconTimer)
+            {
+                KillTimer(hwnd, kAddIconTimer);
+                AddTrayIcon();
+                return 0;
+            }
             if (wp == kTipTimer)
             {
                 KillTimer(hwnd, kTipTimer);
@@ -601,9 +637,13 @@ namespace
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
         case WM_DPICHANGED:
-            AddTrayIcon();  // redraw the icon for the new theme / DPI (NIM_ADD on an existing id just fails)
-            g_nid.uFlags = NIF_ICON;
-            Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+        {
+            UpdateIconImage();  // redraw the icon for the new theme / DPI
+            NOTIFYICONDATAW nid = g_nid;
+            nid.uFlags = NIF_ICON;
+            nid.hIcon = g_icon;
+            Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
             ui::ApplyWindowTheme(hwnd, ui::CurrentTheme());
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;

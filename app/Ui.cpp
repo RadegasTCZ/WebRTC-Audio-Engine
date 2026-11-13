@@ -307,6 +307,7 @@ namespace ui
             FillRect(dc, &c, bg);
             DeleteObject(bg);
             HFONT body = Font(10, FW_NORMAL, dpi), smallFont = Font(9, FW_NORMAL, dpi);
+            HGDIOBJ oldFont = SelectObject(dc, body);
             for (int i = 0; i < static_cast<int>(g_items.size()); ++i)
             {
                 const ListItem& it = g_items[static_cast<size_t>(i)];
@@ -337,6 +338,7 @@ namespace ui
                 RECT tr{r.left + Px(12, dpi), r.top, right, r.bottom};
                 Text(dc, it.text, tr, t.text);
             }
+            SelectObject(dc, oldFont);  // a font still selected into the DC cannot be deleted
             DeleteObject(body);
             DeleteObject(smallFont);
             BitBlt(wdc, 0, 0, c.right, c.bottom, dc, 0, 0, SRCCOPY);
