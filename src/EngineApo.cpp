@@ -67,26 +67,34 @@ namespace
 namespace
 {
     constexpr wchar_t kTimingKey[] = L"Software\\WebrtcAudioEngine\\EchoTiming2";   // 2: values from before ReferenceSync are stale
-    struct RememberedDelay { wchar_t device[64]; int samples; };
+    struct RememberedDelay { wchar_t device[64]; int samples; double ratePpm; };
     SRWLOCK g_rememberedLock = SRWLOCK_INIT;
     RememberedDelay g_remembered[32] = {};
 
-    int LoadRememberedDelay(const wchar_t* device) noexcept
+    // Remembered per microphone: the mic delay (48 kHz samples, value "{guid}") and the reference rate
+    // correction (0.1 ppm units as a signed DWORD, value "{guid}.rate").
+    int LoadRememberedDelay(const wchar_t* device, double& ratePpm) noexcept
     {
+        ratePpm = 0.0;
         if (!device || !*device) return 0;
         int found = -1;
         AcquireSRWLockShared(&g_rememberedLock);
         for (const auto& r : g_remembered)
-            if (r.device[0] && _wcsicmp(r.device, device) == 0) { found = r.samples; break; }
+            if (r.device[0] && _wcsicmp(r.device, device) == 0) { found = r.samples; ratePpm = r.ratePpm; break; }
         ReleaseSRWLockShared(&g_rememberedLock);
         if (found >= 0) return found;
+        wchar_t rateName[80];
+        swprintf_s(rateName, L"%s.rate", device);
         DWORD v = 0, size = sizeof(v);
+        if (RegGetValueW(HKEY_CURRENT_USER, kTimingKey, rateName, RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS)
+            ratePpm = std::clamp(static_cast<int32_t>(v) / 10.0, -1000.0, 1000.0);
+        size = sizeof(v);
         if (RegGetValueW(HKEY_CURRENT_USER, kTimingKey, device, RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS)
             return static_cast<int>(std::min<DWORD>(v, EchoTimingController::kMaxDelaySamples));
         return 0;
     }
 
-    void RememberDelay(const wchar_t* device, int samples) noexcept
+    void RememberDelay(const wchar_t* device, int samples, double ratePpm) noexcept
     {
         if (!device || !*device) return;
         AcquireSRWLockExclusive(&g_rememberedLock);
@@ -100,6 +108,7 @@ namespace
         {
             wcsncpy_s(slot->device, device, _TRUNCATE);
             slot->samples = samples;
+            slot->ratePpm = ratePpm;
         }
         ReleaseSRWLockExclusive(&g_rememberedLock);
         HKEY key = nullptr;
@@ -107,6 +116,10 @@ namespace
         {
             const DWORD v = static_cast<DWORD>(samples);
             RegSetValueExW(key, device, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
+            wchar_t rateName[80];
+            swprintf_s(rateName, L"%s.rate", device);
+            const DWORD r = static_cast<DWORD>(static_cast<int32_t>(std::lround(ratePpm * 10.0)));
+            RegSetValueExW(key, rateName, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&r), sizeof(r));
             RegCloseKey(key);
         }
     }
@@ -448,8 +461,9 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
             if (RegGetValueW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, L"AutoMicDelay", RRF_RT_REG_DWORD, nullptr, &autoTiming,
                              &atSize) != ERROR_SUCCESS)
                 autoTiming = 1;
-            const int remembered = autoTiming ? LoadRememberedDelay(m_deviceGuid) : 0;
-            m_proc.SetEchoTimingSetup(autoTiming != 0, remembered);
+            double rememberedRate = 0.0;
+            const int remembered = autoTiming ? LoadRememberedDelay(m_deviceGuid, rememberedRate) : 0;
+            m_proc.SetEchoTimingSetup(autoTiming != 0, remembered, rememberedRate);
             m_timingMeasured = m_timingValid = m_timingOutOfRange = m_timingChanges = 0;
             m_timingAgreedLogged = false;
             m_timingLast = {};
@@ -471,8 +485,9 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
             if (ok && m_proc.EchoTimingActive())
             {
                 StartTimingTimer();
-                apolog::Write(L"[%s #%ld] echo timing: automatic, starting with %s mic delay %.1f ms", SlotName(), m_instanceId,
-                              remembered ? L"the remembered" : L"no", m_proc.MicDelaySamples() / 48.0);
+                apolog::Write(L"[%s #%ld] echo timing: automatic, starting with %s mic delay %.1f ms, reference rate %+.1f ppm",
+                              SlotName(), m_instanceId, remembered ? L"the remembered" : L"no", m_proc.MicDelaySamples() / 48.0,
+                              m_proc.Sync().RatePpm());
             }
             else if (ok && m_proc.HasAec() && !autoTiming)
                 apolog::Write(L"[%s #%ld] echo timing: automatic mic delay OFF (AutoMicDelay = 0)", SlotName(), m_instanceId);
@@ -521,7 +536,7 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
     {
         const int delay = m_proc.MicDelaySamples();
         if (m_timingAgreedLogged)
-            RememberDelay(m_deviceGuid, delay);   // also a 0: the next stream must not keep a stale delay
+            RememberDelay(m_deviceGuid, delay, m_proc.Sync().RatePpm());   // also a 0: never keep a stale delay
         apolog::Write(L"[%s #%ld] echo timing: %d measurements (%d clear, %d out of range), %d change(s), mic delay %.1f ms%s, "
                       L"last: echo %+.2f ms vs reference as AEC3 sees it, quality %.0f", SlotName(), m_instanceId, m_timingMeasured,
                       m_timingValid, m_timingOutOfRange, m_timingChanges, delay / 48.0,
@@ -684,11 +699,17 @@ void CEngineApo::OnTimingTick() noexcept
         ++m_timingChanges;
         apolog::Write(L"[%s #%ld] echo timing: echo %+.2f ms vs reference (quality %.0f) -> mic delayed %.1f ms%s", SlotName(),
                       m_instanceId, ev.decision.rawOffsetMs, ev.result.quality, ev.decision.delaySamples / 48.0,
-                      ev.decision.capped ? L" (CAPPED at the 20 ms maximum)" : L"");
-        RememberDelay(m_deviceGuid, ev.decision.delaySamples);
+                      ev.decision.capped ? L" (CAPPED at the 25 ms maximum)" : L"");
+        RememberDelay(m_deviceGuid, ev.decision.delaySamples, ev.ratePpm);
         m_timingAgreedLogged = true;
     }
-    else if (ev.agreed && !m_timingAgreedLogged)
+    if (ev.rateChanged)
+    {
+        apolog::Write(L"[%s #%ld] echo timing: echo slides %+.2f ms per minute (%+.1f ppm) -> reference rate %+.1f ppm", SlotName(),
+                      m_instanceId, ev.slidePpm * 0.06, ev.slidePpm, ev.ratePpm);
+        RememberDelay(m_deviceGuid, ev.delaySamples, ev.ratePpm);
+    }
+    if (!ev.decision.change && ev.agreed && !m_timingAgreedLogged)
     {
         m_timingAgreedLogged = true;
         apolog::Write(L"[%s #%ld] echo timing: echo %+.2f ms vs reference (quality %.0f) -> mic delay %.1f ms is right, no change",

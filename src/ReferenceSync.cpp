@@ -9,12 +9,7 @@ namespace
 {
     constexpr int kRate = 48000;
     constexpr int kSettleBlocks = 50;           // 0.5 s to learn the natural backlog
-    constexpr double kEma = 1.0 / 200.0;        // backlog smoothing (2 s): the clock stamps jitter by ~1 ms
-    // PI loop on the backlog error (samples), per block of 480: P time constant ~20 s, critically damped.
-    // Gentle on purpose: every rate wobble is a sliding fractional delay the echo filter must follow.
-    constexpr double kP = 1e-6;                 // 1 ms (48 samples) of error -> 48 ppm
-    constexpr double kI = 480.0 * kP * kP / 4.0;
-    constexpr double kDeadband = 2.0;           // samples of backlog error ignored (no chasing of rounding/noise)
+    constexpr double kEma = 1.0 / 200.0;        // backlog smoothing for the meters (2 s)
     constexpr double kStallSeconds = 0.1;       // no reference write for this long: the speakers' stream stalled
 
     double BesselI0(double x)
@@ -64,7 +59,7 @@ void ReferenceSync::Reset() noexcept
     m_settleSum = 0.0;
     m_target = kStartCap;
     m_fillEma = 0.0;
-    m_integ = 0.0;
+    m_ratePpb.store(0);
     m_ratioPpm = 0.0;
     m_resyncs = m_dry = 0;
     m_dryRun = 0;
@@ -122,7 +117,7 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
         Restart(ring);
     }
 
-    double ratio = 1.0 + m_integ;
+    const double ratio = 1.0 + RatePpm() * 1e-6;
     const double backlog = Backlog(ring, nowTicks, freq);
     size_t written = 0;
     int64_t ticks = 0;
@@ -166,14 +161,7 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
             return silence();   // the reference fell far behind: wait for it (consume nothing)
         }
         else
-        {
-            m_fillEma += kEma * (backlog - m_fillEma);
-            const double raw = m_fillEma - m_target;
-            const double e = raw > kDeadband ? raw - kDeadband : raw < -kDeadband ? raw + kDeadband : 0.0;
-            m_integ = std::clamp(m_integ + kI * e, -kMaxRatio, kMaxRatio);
-            // Proportional term grows with the error: gentle near the target, quick when far off (+-0.1 % clocks).
-            ratio = 1.0 + std::clamp(m_integ + kP * e * (1.0 + std::fabs(e) / 240.0), -kMaxRatio, kMaxRatio);
-        }
+            m_fillEma += kEma * (backlog - m_fillEma);   // inside the band: the rate alone decides (no chasing)
     }
     m_ratioPpm = (ratio - 1.0) * 1e6;
 

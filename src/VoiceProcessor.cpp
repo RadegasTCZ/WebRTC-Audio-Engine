@@ -289,9 +289,37 @@ VoiceProcessor::EchoTimingEvent VoiceProcessor::EchoTimingTick() noexcept
         return ev;
     ev.measured = true;
     ev.result = m_estimator->Estimate(m_t8mic.data(), m_t8ref.data());
+
+    // Echo slide -> reference rate. Points only from clean spans: not while the delay controller settles,
+    // and start over after any jump of the reference (resync / dry block) or of the delay.
+    const uint64_t guard = m_sync.Resyncs() + m_sync.DryBlocks();
+    if (guard != m_driftGuard) { m_drift.Clear(); m_driftGuard = guard; }
+    if (ev.result.valid && !m_timing.Settling())
+        m_drift.Add(static_cast<double>(m_probe->Written()) / EchoTimingProbe::kRate,
+                    ev.result.offsetMs - static_cast<float>(m_timing.Delay()) / 48.0f);
+
     ev.decision = m_timing.OnResult(ev.result);
     if (ev.decision.change)
+    {
         m_micDelayTarget.store(ev.decision.delaySamples, std::memory_order_relaxed);
+        m_drift.Clear();
+    }
+    if (++m_driftTicks >= 10)   // every 10 s
+    {
+        m_driftTicks = 0;
+        double slide = 0.0, span = 0.0;
+        int points = 0;
+        if (m_drift.Slope(slide, points, span) && points >= 20 && span >= 20.0 && std::fabs(slide) > 1.5)
+        {
+            // Echo comes ever earlier (slide < 0) = the reference content runs fast: read it faster.
+            const double rate = std::clamp(m_sync.RatePpm() - 0.8 * slide, -ReferenceSync::kMaxRatio * 1e6, ReferenceSync::kMaxRatio * 1e6);
+            m_sync.SetRatePpm(rate);
+            m_drift.Clear();
+            ev.rateChanged = true;
+            ev.slidePpm = slide;
+        }
+    }
+    ev.ratePpm = m_sync.RatePpm();
     ev.delaySamples = m_timing.Delay();
     ev.agreed = m_timing.HasAgreed();
     return ev;
@@ -364,6 +392,10 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
     m_hasAec.store(m_aec != nullptr);
     m_refUnderruns = 0;
     m_sync.Reset();
+    m_sync.SetRatePpm(m_refRing && m_autoTiming ? m_initialRatePpm : 0.0);
+    m_drift.Clear();
+    m_driftTicks = 0;
+    m_driftGuard = 0;
     m_blockTicks = 0;
 
     // Automatic echo timing (only with a reference: without one there is no echo to line up).

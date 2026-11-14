@@ -880,18 +880,23 @@ int main()
         bench("everything on, 32 kHz mic (resampled)", all, true, 32000);
     }
 
-    std::printf("[20] reference sync: the reference arrives faster/slower than the mic consumes it (as measured: +62 ppm)\n");
+    std::printf("[20] reference sync: the reference content runs faster/slower than the mic (as measured: +60 ppm)\n");
     {
-        // Event simulation on the capture clock (ticks = capture samples, 48000 per second). The playback side
-        // delivers 480-sample chunks every 480 / rate ticks, stamped; the capture side processes a block every
-        // 480 ticks. The mic hears the echo 30 ms after the sound was played. 6 minutes.
+        // Event simulation on the capture clock (ticks = capture samples, 48000 per second); the mic hears the
+        // echo 30 ms after the sound was played; 6 minutes, echo timing ticking every second (the rate is learnt
+        // from the echo slide). Two delivery models:
+        // - timely:   each 480-sample chunk is delivered when it has finished playing (stamped then);
+        // - lockstep: as measured on the owner's laptop: one chunk per capture block, and the surplus (deficit)
+        //   comes as an extra (missing) chunk whenever it reaches a whole chunk.
         Settings st = def; st.nsEnabled = 0; st.hpfEnabled = 0; st.lpfEnabled = 0; st.limiterEnabled = 0;
         constexpr int kSeconds = 360;
-        for (double ppm : {62.0, -150.0, 0.0})
+        struct Case { double ppm; bool lockstep; };
+        for (const Case cs : {Case{60.0, true}, Case{-150.0, true}, Case{62.0, false}, Case{-150.0, false}, Case{0.0, true}})
         {
+            const double ppm = cs.ppm;
             const double rate = 1.0 + ppm * 1e-6;   // playback samples per capture sample
             const int nCap = 48000 * kSeconds;
-            const int nPlay = static_cast<int>(nCap * rate) + 4800;
+            const int nPlay = static_cast<int>(nCap * rate) + 48000;
             std::mt19937 rng(17);
             std::normal_distribution<float> g(0.0f, 0.1f);
             std::vector<float> played(static_cast<size_t>(nPlay));
@@ -900,23 +905,30 @@ int main()
             ring.Init(48000);
             VoiceProcessor vp;
             vp.SetReference(&ring);
-            vp.SetEchoTimingSetup(false, 0);
+            vp.SetEchoTimingSetup(true, 0);
             vp.Prepare(kCh, 48000, st);
             std::vector<float> mic(480 * kCh), y(480 * kCh);
             double echoSq = 0, outSq = 0;
             int nextChunk = 0;
+            uint64_t resyncsLate = 0, dryLate = 0;
             float lp = 0;
             for (int b = 0; b < nCap / 480; ++b)
             {
                 const int64_t now = static_cast<int64_t>(b + 1) * 480;
-                // Deliver every playback chunk that has finished playing by now, stamped with when it finished
-                // (like AcceptInput: the stamp is always in the past).
-                while (static_cast<double>(nextChunk + 1) * 480 / rate <= static_cast<double>(now))
-                {
-                    const int64_t at = static_cast<int64_t>(std::llround((nextChunk + 1) * 480 / rate));
+                const auto deliver = [&](int64_t at) {
                     ring.Write(played.data() + static_cast<size_t>(nextChunk) * 480, 480, at);
                     ++nextChunk;
+                };
+                if (cs.lockstep)
+                {
+                    // Content played by now = now * rate; deliver whole chunks of it, but at most one per block
+                    // more than one (the extra packet), never more than what has played.
+                    const int due = static_cast<int>(static_cast<double>(now) * rate / 480.0);
+                    for (int k = 0; k < 2 && nextChunk < due; ++k) deliver(now);
                 }
+                else
+                    while (static_cast<double>(nextChunk + 1) * 480 / rate <= static_cast<double>(now))
+                        deliver(static_cast<int64_t>(std::llround((nextChunk + 1) * 480 / rate)));
                 for (int i = 0; i < 480; ++i)
                 {
                     // Capture sample (b*480+i) hears what was played 30 ms (1440 capture samples) earlier.
@@ -927,6 +939,13 @@ int main()
                 }
                 vp.SetClock(now, 48000);
                 vp.Process(mic.data(), y.data(), 480, st);
+                if (b % 100 == 99)
+                {
+                    const auto ev = vp.EchoTimingTick();
+                    if (ev.rateChanged)
+                        std::printf("      %3d s: echo slides %+.1f ppm -> rate %+.1f ppm\n", (b + 1) / 100, ev.slidePpm, ev.ratePpm);
+                }
+                if (b == 120 * 100) { resyncsLate = vp.Sync().Resyncs(); dryLate = vp.ReferenceUnderruns(); }
                 if (b >= (kSeconds - 60) * 100)   // the last minute
                     for (int i = 0; i < 480; ++i)
                     {
@@ -934,13 +953,16 @@ int main()
                         outSq += static_cast<double>(y[static_cast<size_t>(i) * kCh]) * y[static_cast<size_t>(i) * kCh];
                     }
             }
+            resyncsLate = vp.Sync().Resyncs() - resyncsLate;
+            dryLate = vp.ReferenceUnderruns() - dryLate;
             const double removed = 10.0 * std::log10((echoSq + 1e-20) / (outSq + 1e-20));
-            std::printf("    %+6.0f ppm: sync %+6.1f ppm, %llu resync(s), %llu dry block(s), backlog %.1f ms (target %.1f); echo removed in the 6th minute %.1f dB\n",
-                        ppm, vp.Sync().RatioPpm(), static_cast<unsigned long long>(vp.Sync().Resyncs()),
-                        static_cast<unsigned long long>(vp.ReferenceUnderruns()), vp.Sync().BacklogSamples() / 48.0,
-                        vp.Sync().TargetSamples() / 48.0, removed);
-            EXPECT(std::fabs(vp.Sync().RatioPpm() - ppm) < 5.0, "sync settled at %.1f ppm, expected %.0f", vp.Sync().RatioPpm(), ppm);
-            EXPECT(vp.Sync().Resyncs() == 0, "%llu resyncs", static_cast<unsigned long long>(vp.Sync().Resyncs()));
+            std::printf("    %+6.0f ppm %-8s: rate %+6.1f ppm, %llu resync(s) (%llu after 2 min), %llu dry block(s) (%llu after 2 min), backlog %.1f ms (target %.1f); last minute %.1f dB\n",
+                        ppm, cs.lockstep ? "lockstep" : "timely", vp.Sync().RatePpm(), static_cast<unsigned long long>(vp.Sync().Resyncs()),
+                        static_cast<unsigned long long>(resyncsLate), static_cast<unsigned long long>(vp.ReferenceUnderruns()),
+                        static_cast<unsigned long long>(dryLate), vp.Sync().BacklogSamples() / 48.0, vp.Sync().TargetSamples() / 48.0, removed);
+            EXPECT(std::fabs(vp.Sync().RatePpm() - ppm) < 5.0, "rate settled at %.1f ppm, expected %.0f", vp.Sync().RatePpm(), ppm);
+            EXPECT(resyncsLate == 0 && dryLate == 0, "%llu resyncs / %llu dry blocks after 2 min", static_cast<unsigned long long>(resyncsLate),
+                   static_cast<unsigned long long>(dryLate));
             EXPECT(removed > 30.0, "only %.1f dB echo removed", removed);
         }
     }

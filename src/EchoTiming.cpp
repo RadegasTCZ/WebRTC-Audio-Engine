@@ -249,3 +249,44 @@ EchoTimingController::Decision EchoTimingController::OnResult(const EchoTimingRe
     d.delaySamples = needed;
     return d;
 }
+
+// ------------------------------------------------------------------ drift (non-RT)
+
+void EchoDriftEstimator::Add(double seconds, float rawMs) noexcept
+{
+    if (m_n == kMax)
+    {
+        std::copy(m_t + 1, m_t + kMax, m_t);
+        std::copy(m_v + 1, m_v + kMax, m_v);
+        --m_n;
+    }
+    m_t[m_n] = seconds;
+    m_v[m_n] = rawMs;
+    ++m_n;
+}
+
+bool EchoDriftEstimator::Slope(double& ppm, int& points, double& span) const noexcept
+{
+    points = m_n;
+    span = m_n > 1 ? m_t[m_n - 1] - m_t[0] : 0.0;
+    if (m_n < 2) return false;
+    // Segments: a new one starts at every jump.
+    int seg[kMax];
+    int id = 0;
+    seg[0] = 0;
+    for (int i = 1; i < m_n; ++i)
+    {
+        if (std::fabs(m_v[i] - m_v[i - 1]) > 1.5f) ++id;
+        seg[i] = id;
+    }
+    static thread_local double slopes[kMax * (kMax - 1) / 2];
+    int k = 0;
+    for (int i = 0; i < m_n; ++i)
+        for (int j = i + 1; j < m_n; ++j)
+            if (seg[i] == seg[j] && m_t[j] - m_t[i] >= 5.0)   // pairs at least 5 s apart (noise ~0.1 ms)
+                slopes[k++] = (m_v[j] - m_v[i]) / (m_t[j] - m_t[i]);
+    if (k < 10) return false;
+    std::nth_element(slopes, slopes + k / 2, slopes + k);
+    ppm = slopes[k / 2] * 1000.0;   // ms per s -> ppm
+    return true;
+}

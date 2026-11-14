@@ -100,6 +100,7 @@ public:
     Decision OnResult(const EchoTimingResult& r) noexcept;
     int Delay() const noexcept { return m_delay; }
     bool HasAgreed() const noexcept { return m_agreed; }
+    bool Settling() const noexcept { return m_settle > 0; }
     float LastRawOffsetMs() const noexcept { return m_lastRaw; }
 
 private:
@@ -109,4 +110,22 @@ private:
     int m_count = 0;
     bool m_agreed = false;
     float m_lastRaw = 0.0f;
+};
+
+// How fast the echo slides against the reference (ppm; - = the reference content runs fast, so the echo
+// comes ever earlier). Theil-Sen (median of pairwise slopes) over the raw echo positions, with pairs only
+// inside stretches without a jump (> 1.5 ms between neighbours), so a resync or a packet jump does not bend it.
+class EchoDriftEstimator
+{
+public:
+    static constexpr int kMax = 64;
+    void Clear() noexcept { m_n = 0; }
+    void Add(double seconds, float rawMs) noexcept;
+    // False until there are enough points. used = pairs' points, span = seconds covered.
+    bool Slope(double& ppm, int& points, double& span) const noexcept;
+
+private:
+    double m_t[kMax]{};
+    float m_v[kMax]{};
+    int m_n = 0;
 };
