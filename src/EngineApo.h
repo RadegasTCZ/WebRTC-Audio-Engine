@@ -122,6 +122,14 @@ private:
     static constexpr int kDelaySteps = 360;  // 1 hour
     int16_t m_delaySteps[kDelaySteps] = {};
     int m_delayCount = 0, m_delayMeters = 0;
+    // Diagnostics per 10 s: echo-reference queue (mean / min samples, trimmed, underruns) and the echo position
+    // measured by the automatic timing (raw, i.e. without our mic delay; 0.1 ms units, INT16_MIN = none).
+    int16_t m_queueAvgSteps[kDelaySteps] = {}, m_queueMinSteps[kDelaySteps] = {};
+    int32_t m_queueTrimSteps[kDelaySteps] = {}, m_queueUnderSteps[kDelaySteps] = {};
+    int m_queueCount = 0, m_queueMeters = 0, m_queueMinAcc = 0;
+    double m_queueAvgAcc = 0;
+    uint64_t m_lastTrimmed = 0, m_lastUnderruns = 0;
+    int16_t m_offsetSteps[kDelaySteps] = {};
     bool m_dumpArmed = false;           // registry DiagDumpSeconds > 0 at stream start
     std::atomic<bool> m_refActive{false};
     DWORD m_refInputId = 0;

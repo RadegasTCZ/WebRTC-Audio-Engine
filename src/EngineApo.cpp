@@ -392,6 +392,11 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
     ResetStats();
     m_echoTimeline.Reset();
     m_delayCount = m_delayMeters = 0;
+    m_queueCount = m_queueMeters = 0;
+    m_queueAvgAcc = 0;
+    m_queueMinAcc = INT_MAX;
+    m_lastTrimmed = m_lastUnderruns = 0;
+    std::fill(std::begin(m_offsetSteps), std::end(m_offsetSteps), INT16_MIN);
     m_dumpArmed = false;
     m_lockTick = GetTickCount64();
     m_latencyLogged = 0;
@@ -554,6 +559,31 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
                           (start % 6) * 10, line);
         }
     }
+    if (m_queueCount > 0)
+    {
+        // Diagnostics: does the reference queue drift (render vs capture pace), and where is the echo?
+        auto timeline = [&](const wchar_t* title, auto value) {
+            for (int start = 0; start < m_queueCount; start += 30)
+            {
+                wchar_t line[600] = L"";
+                size_t used = 0;
+                for (int i = start; i < std::min(m_queueCount, start + 30); ++i)
+                {
+                    wchar_t v[24];
+                    value(i, v);
+                    const int n = swprintf_s(line + used, std::size(line) - used, L" %s", v);
+                    if (n > 0) used += static_cast<size_t>(n);
+                }
+                apolog::Write(L"[%s #%ld] %s per 10 s from %02d:%02d:%s", SlotName(), m_instanceId, title, start / 6, (start % 6) * 10, line);
+            }
+        };
+        timeline(L"reference queue mean samples", [&](int i, wchar_t (&v)[24]) { swprintf_s(v, L"%d", m_queueAvgSteps[i]); });
+        timeline(L"reference queue min samples", [&](int i, wchar_t (&v)[24]) { swprintf_s(v, L"%d", m_queueMinSteps[i]); });
+        timeline(L"reference trimmed/underrun blocks", [&](int i, wchar_t (&v)[24]) {
+            swprintf_s(v, L"%d/%d", m_queueTrimSteps[i], m_queueUnderSteps[i]); });
+        timeline(L"echo vs reference ms (raw, auto timing)", [&](int i, wchar_t (&v)[24]) {
+            if (m_offsetSteps[i] == INT16_MIN) wcscpy_s(v, L"."); else swprintf_s(v, L"%+.1f", m_offsetSteps[i] / 10.0); });
+    }
     if (m_dumpArmed)
     {
         m_dumpArmed = false;
@@ -629,7 +659,16 @@ void CEngineApo::OnTimingTick() noexcept
     if (!ev.measured)
         return;
     ++m_timingMeasured;
-    if (ev.result.valid) { ++m_timingValid; m_timingLast = ev.result; }
+    if (ev.result.valid)
+    {
+        ++m_timingValid;
+        m_timingLast = ev.result;
+        // Raw echo position for the per-10 s diagnostics timeline (the delay that was in effect when measured).
+        const size_t step = static_cast<size_t>((GetTickCount64() - m_lockTick) / 10000);
+        const float raw = ev.result.offsetMs - static_cast<float>(m_proc.MicDelaySamples()) / 48.0f;
+        if (step < std::size(m_offsetSteps))
+            m_offsetSteps[step] = static_cast<int16_t>(std::clamp(std::lround(raw * 10.0f), -32767L, 32767L));
+    }
     if (ev.result.outOfRange)
     {
         if (++m_timingOutOfRange == 1)
@@ -693,6 +732,28 @@ STDMETHODIMP_(void) CEngineApo::APOProcess(UINT32 u32NumInputConnections, APO_CO
                 m_delayMeters = 0;
                 if (m_delayCount < kDelaySteps)
                     m_delaySteps[m_delayCount++] = static_cast<int16_t>(std::min(mt.aecDelayMs, 32767));
+            }
+            if (mt.aecDelayMs >= 0)
+            {
+                m_queueAvgAcc += mt.refQueueAvg;
+                m_queueMinAcc = std::min(m_queueMinAcc, mt.refQueueMin);
+                if (++m_queueMeters >= 100)   // one value per 10 s
+                {
+                    if (m_queueCount < kDelaySteps)
+                    {
+                        const uint64_t under = m_proc.ReferenceUnderruns();
+                        m_queueAvgSteps[m_queueCount] = static_cast<int16_t>(std::lround(m_queueAvgAcc / m_queueMeters));
+                        m_queueMinSteps[m_queueCount] = static_cast<int16_t>(std::min(m_queueMinAcc, 32767));
+                        m_queueTrimSteps[m_queueCount] = static_cast<int32_t>(mt.refTrimmed - m_lastTrimmed);
+                        m_queueUnderSteps[m_queueCount] = static_cast<int32_t>(under - m_lastUnderruns);
+                        m_lastTrimmed = mt.refTrimmed;
+                        m_lastUnderruns = under;
+                        ++m_queueCount;
+                    }
+                    m_queueMeters = 0;
+                    m_queueAvgAcc = 0;
+                    m_queueMinAcc = INT_MAX;
+                }
             }
             if (m_telemetry)
             {

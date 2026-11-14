@@ -96,6 +96,9 @@ public:
         float echoRemovedDb = 0, agcGainDb = 0, limiterDb = 0;
         float speech = 0;  // mean speech probability (AGC2 voice detector, runs even when AGC is off)
         int aecDelayMs = -1;  // AEC3's own estimate of the echo delay (reference -> microphone); -1 = no AEC3
+        float refQueueAvg = 0;   // echo reference samples waiting in the queue (mean over the 100 ms)
+        int refQueueMin = 0;     // smallest queue seen before a read in the 100 ms
+        uint64_t refTrimmed = 0; // reference samples dropped by the queue bound, since the stream started
         bool aecRunning = false;
     };
 
@@ -249,6 +252,9 @@ private:
     double m_inSq = 0, m_outSq = 0, m_refSq = 0;
     float m_limPeakDb = 0;
     float m_speechSum = 0;
+    double m_queueSum = 0;
+    size_t m_queueMin = SIZE_MAX;
+    uint64_t m_refTrimmed = 0;
 
     std::unique_ptr<Resampling> m_rs;   // null at 48 kHz
     int m_rate = 0;

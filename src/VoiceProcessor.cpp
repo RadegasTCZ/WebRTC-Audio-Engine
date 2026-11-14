@@ -368,6 +368,9 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
     m_aec = m_refRing ? std::make_unique<AecInstance>(initial.aecStrength, initial.aecRoom) : nullptr;
     m_hasAec.store(m_aec != nullptr);
     m_refUnderruns = 0;
+    m_refTrimmed = 0;
+    m_queueSum = 0;
+    m_queueMin = SIZE_MAX;
 
     // Automatic echo timing (only with a reference: without one there is no echo to line up).
     int delay = 0;
@@ -509,6 +512,10 @@ void VoiceProcessor::ProcessBlock() noexcept
         bool have = false;
         if (m_refRing)
         {
+            const size_t queued = m_refRing->Available();   // diagnostics: does the queue drift?
+            m_queueSum += static_cast<double>(queued);
+            m_queueMin = std::min(m_queueMin, queued);
+            if (queued > 4 * kBlock) m_refTrimmed += queued - 4 * kBlock;
             m_refRing->TrimTo(4 * kBlock);  // bound the reference queue (AEC3 tracks the remaining delay)
             have = m_refRing->Read(m_ref.data(), kBlock);
         }
@@ -622,6 +629,11 @@ void VoiceProcessor::ProcessBlock() noexcept
         m_meters.agcGainDb = m_settings.agcEnabled ? m_agc->LastGainDb() : 0.0f;
         m_meters.limiterDb = m_settings.limiterEnabled ? m_limPeakDb : 0.0f;
         m_meters.speech = m_speechSum / 10.0f;
+        m_meters.refQueueAvg = static_cast<float>(m_queueSum / 10.0);
+        m_meters.refQueueMin = m_queueMin == SIZE_MAX ? 0 : static_cast<int>(m_queueMin);
+        m_meters.refTrimmed = m_refTrimmed;
+        m_queueSum = 0;
+        m_queueMin = SIZE_MAX;
         m_metersReady = true;
         m_meterBlocks = 0;
         m_inSq = m_outSq = m_refSq = 0;
