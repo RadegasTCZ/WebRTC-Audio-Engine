@@ -127,7 +127,8 @@ private:
     int16_t m_queueAvgSteps[kDelaySteps] = {}, m_queueMinSteps[kDelaySteps] = {};
     int32_t m_queueTrimSteps[kDelaySteps] = {}, m_queueUnderSteps[kDelaySteps] = {};
     int m_queueCount = 0, m_queueMeters = 0, m_queueMinAcc = 0;
-    double m_queueAvgAcc = 0;
+    double m_queueAvgAcc = 0, m_ppmAcc = 0;   // per 10 s: reference backlog (samples), sync ppm (x10 in steps)
+    int m_lastTarget = 0;
     uint64_t m_lastTrimmed = 0, m_lastUnderruns = 0;
     int16_t m_offsetSteps[kDelaySteps] = {};
     bool m_dumpArmed = false;           // registry DiagDumpSeconds > 0 at stream start

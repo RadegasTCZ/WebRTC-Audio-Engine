@@ -81,12 +81,12 @@ class EchoTimingController
 {
 public:
     static constexpr float kMarginMs = 8.0f;      // keep the echo at least this far after the reference
-    static constexpr float kMaxDelayMs = 20.0f;
+    static constexpr float kMaxDelayMs = 25.0f;     // fits the fixed 50 ms latency budget
     static constexpr float kAgreeMs = 1.0f;       // 3 results within this spread
     static constexpr int kAgreeCount = 3;
     static constexpr float kChangeMs = 3.0f;      // change only when the needed delay moves this much
     static constexpr int kSettleTicks = 4;        // results ignored after a change (span = 3 s, 1 tick/s)
-    static constexpr int kMaxDelaySamples = static_cast<int>(kMaxDelayMs * 48);   // 960
+    static constexpr int kMaxDelaySamples = static_cast<int>(kMaxDelayMs * 48);   // 1200
 
     struct Decision
     {

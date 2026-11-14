@@ -32,6 +32,8 @@ add_library(voice_core STATIC
   src/EchoTimeline.h
   src/EchoTiming.cpp
   src/EchoTiming.h
+  src/ReferenceSync.cpp
+  src/ReferenceSync.h
 )
 target_include_directories(voice_core PUBLIC third_party/speexdsp)
 set_source_files_properties(third_party/speexdsp/resample.c PROPERTIES COMPILE_OPTIONS "/W0")

@@ -9,6 +9,7 @@
 #include "AgcStage.h"
 #include "EchoTiming.h"
 #include "ReferenceRing.h"
+#include "ReferenceSync.h"
 #include "Settings.h"
 
 namespace webrtc { class AudioBuffer; class EchoControl; class NoiseSuppressor; }
@@ -30,6 +31,10 @@ namespace webrtc { class AudioBuffer; class EchoControl; class NoiseSuppressor; 
 // - Automatic echo timing (streams with a reference): if the echo reaches the mic too early for AEC3,
 //   every input channel is delayed (0..20 ms, crossfaded) in front of the whole chain. EchoTimingTick()
 //   measures and decides on a non-RT thread; see EchoTiming.h.
+// - FIXED LATENCY of 50 ms (owner's choice 2026-11-14): chain (25 ms) + mic delay + output padding always add
+//   up to kTotalLatency. A mic delay change moves the padding exactly when the shifted audio reaches the end
+//   of the chain, so the output timing never moves and the reported latency is always true.
+// - The echo reference is read through ReferenceSync (rate-locked to the microphone).
 //
 // Threading: Prepare()/SetReference() allocate or configure (LockForProcess). Process() never
 // allocates, locks or blocks.
@@ -45,7 +50,9 @@ public:
     static constexpr int kAecLatency = 384;         // AEC3 block framing, measured by ProcessorTests [11]
     static constexpr int kNsLatency = 288;          // NS overlap, 96 samples per band * 3
     static constexpr int kAlgorithmLatency = kSplitLatency + kAecLatency + kNsLatency;   // 718
-    static constexpr int kTotalLatency = kBlock + kAlgorithmLatency;
+    static constexpr int kChainLatency = kBlock + kAlgorithmLatency;   // 1198 (25 ms)
+    static constexpr int kTotalLatency = 2400;                         // fixed budget: 50 ms
+    static constexpr int kPadLatency = kTotalLatency - kChainLatency;  // padding when the mic delay is 0
     static constexpr int kMinRate = 8000;
     static constexpr int kMaxRate = 192000;
 
@@ -63,8 +70,10 @@ public:
     // Which settings snapshot this processor follows (settings::RegisterDevice; -1 = defaults).
     void SetSettingsIndex(int index) noexcept { m_settingsIndex = index; }
 
-    // Includes the current automatic mic delay (in device frames).
-    int LatencyFrames() const noexcept;
+    int LatencyFrames() const noexcept { return m_latencyFrames; }   // fixed (the mic delay is inside the budget)
+    // Clock reading at the start of the next Process call (e.g. QueryPerformanceCounter), for ReferenceSync.
+    void SetClock(int64_t nowTicks, int64_t freq) noexcept { m_callTicks = nowTicks; m_tickFreq = freq; }
+    const ReferenceSync& Sync() const noexcept { return m_sync; }
 
     // Automatic echo timing. Call before Prepare (non-RT). initialDelay = 48 kHz samples remembered for this
     // microphone (applied from the first block and included in the latency); ignored without a reference.
@@ -96,9 +105,10 @@ public:
         float echoRemovedDb = 0, agcGainDb = 0, limiterDb = 0;
         float speech = 0;  // mean speech probability (AGC2 voice detector, runs even when AGC is off)
         int aecDelayMs = -1;  // AEC3's own estimate of the echo delay (reference -> microphone); -1 = no AEC3
-        float refQueueAvg = 0;   // echo reference samples waiting in the queue (mean over the 100 ms)
-        int refQueueMin = 0;     // smallest queue seen before a read in the 100 ms
-        uint64_t refTrimmed = 0; // reference samples dropped by the queue bound, since the stream started
+        float refBacklog = 0;    // echo reference backlog (samples, smoothed) held by ReferenceSync
+        int refTarget = 0;       // the backlog it holds
+        float refPpm = 0;        // its rate correction
+        uint64_t refResyncs = 0; // jumps back to the target since the stream started
         bool aecRunning = false;
     };
 
@@ -185,18 +195,21 @@ private:
             current.reset(fresh);
         }
     };
-    struct MicDelay  // 0..20 ms, changes crossfade over one block
+    struct MicDelay  // 0..25 ms (also the output padding), changes crossfade over 480 samples
     {
         static constexpr size_t kSize = 2048;   // > max delay + one block, power of two
         std::array<float, kSize> buf{};
         size_t w = 0;
         void Clear() noexcept { buf.fill(0.0f); w = 0; }
-        void Run(float* x, int from, int to) noexcept;   // one block, in place
+        // One block, in place. The crossfade from `from` to `to` starts at sample `rampStart` of this block
+        // (negative: it started in an earlier block; >= kBlock: not yet).
+        void Run(float* x, int from, int to, int64_t rampStart = 0) noexcept;
     };
     struct Channel
     {
         VarDelay dry;
         MicDelay mic;
+        MicDelay pad;   // output padding: kPadLatency - mic delay
         std::array<float, kBlock> in{}, out{}, delayed{};
     };
 
@@ -252,13 +265,15 @@ private:
     double m_inSq = 0, m_outSq = 0, m_refSq = 0;
     float m_limPeakDb = 0;
     float m_speechSum = 0;
-    double m_queueSum = 0;
-    size_t m_queueMin = SIZE_MAX;
-    uint64_t m_refTrimmed = 0;
+    ReferenceSync m_sync;
+    int64_t m_callTicks = 0, m_tickFreq = 0, m_blockTicks = 0;
 
     std::unique_ptr<Resampling> m_rs;   // null at 48 kHz
     int m_rate = 0;
-    int m_latencyFrames = 0;   // without the mic delay
+    int m_latencyFrames = 0;
+    int m_pad = kPadLatency, m_padTo = kPadLatency;   // output padding (RT)
+    int64_t m_padSwitchAt = 0;                       // absolute output sample where its crossfade starts
+    uint64_t m_blockIndex = 0;
 
     // Automatic echo timing.
     bool m_autoTiming = true;

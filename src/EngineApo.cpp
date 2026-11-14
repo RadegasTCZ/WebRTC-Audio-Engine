@@ -66,7 +66,7 @@ namespace
 
 namespace
 {
-    constexpr wchar_t kTimingKey[] = L"Software\\WebrtcAudioEngine\\EchoTiming";
+    constexpr wchar_t kTimingKey[] = L"Software\\WebrtcAudioEngine\\EchoTiming2";   // 2: values from before ReferenceSync are stale
     struct RememberedDelay { wchar_t device[64]; int samples; };
     SRWLOCK g_rememberedLock = SRWLOCK_INIT;
     RememberedDelay g_remembered[32] = {};
@@ -394,7 +394,8 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
     m_delayCount = m_delayMeters = 0;
     m_queueCount = m_queueMeters = 0;
     m_queueAvgAcc = 0;
-    m_queueMinAcc = INT_MAX;
+    m_ppmAcc = 0;
+    m_lastTarget = 0;
     m_lastTrimmed = m_lastUnderruns = 0;
     std::fill(std::begin(m_offsetSteps), std::end(m_offsetSteps), INT16_MIN);
     m_dumpArmed = false;
@@ -577,9 +578,12 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
                 apolog::Write(L"[%s #%ld] %s per 10 s from %02d:%02d:%s", SlotName(), m_instanceId, title, start / 6, (start % 6) * 10, line);
             }
         };
-        timeline(L"reference queue mean samples", [&](int i, wchar_t (&v)[24]) { swprintf_s(v, L"%d", m_queueAvgSteps[i]); });
-        timeline(L"reference queue min samples", [&](int i, wchar_t (&v)[24]) { swprintf_s(v, L"%d", m_queueMinSteps[i]); });
-        timeline(L"reference trimmed/underrun blocks", [&](int i, wchar_t (&v)[24]) {
+        apolog::Write(L"[%s #%ld] reference sync: holds a backlog of %.1f ms, rate correction now %+.1f ppm, %llu resync(s), "
+                      L"%llu block(s) without reference", SlotName(), m_instanceId, m_lastTarget / 48.0, m_proc.Sync().RatioPpm(),
+                      m_proc.Sync().Resyncs(), m_proc.ReferenceUnderruns());
+        timeline(L"reference backlog ms", [&](int i, wchar_t (&v)[24]) { swprintf_s(v, L"%.1f", m_queueAvgSteps[i] / 48.0); });
+        timeline(L"reference sync ppm", [&](int i, wchar_t (&v)[24]) { swprintf_s(v, L"%+.1f", m_queueMinSteps[i] / 10.0); });
+        timeline(L"reference resyncs/blocks without reference", [&](int i, wchar_t (&v)[24]) {
             swprintf_s(v, L"%d/%d", m_queueTrimSteps[i], m_queueUnderSteps[i]); });
         timeline(L"echo vs reference ms (raw, auto timing)", [&](int i, wchar_t (&v)[24]) {
             if (m_offsetSteps[i] == INT16_MIN) wcscpy_s(v, L"."); else swprintf_s(v, L"%+.1f", m_offsetSteps[i] / 10.0); });
@@ -715,6 +719,10 @@ STDMETHODIMP_(void) CEngineApo::APOProcess(UINT32 u32NumInputConnections, APO_CO
         float* o = reinterpret_cast<float*>(out->pBuffer);
         const Settings cur = settings::Current(m_devIdx);
         const float gainDb = SliderGainDb(cur);
+        static const int64_t qpcFreq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f.QuadPart; }();
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        m_proc.SetClock(now.QuadPart, qpcFreq);
         if (in->u32BufferFlags == BUFFER_VALID)
             m_proc.Process(reinterpret_cast<const float*>(in->pBuffer), o, static_cast<int>(frames), cur, gainDb);
         else
@@ -735,24 +743,26 @@ STDMETHODIMP_(void) CEngineApo::APOProcess(UINT32 u32NumInputConnections, APO_CO
             }
             if (mt.aecDelayMs >= 0)
             {
-                m_queueAvgAcc += mt.refQueueAvg;
-                m_queueMinAcc = std::min(m_queueMinAcc, mt.refQueueMin);
+                m_queueAvgAcc += mt.refBacklog;
+                m_ppmAcc += mt.refPpm;
+                m_queueMinAcc = mt.refTarget;
                 if (++m_queueMeters >= 100)   // one value per 10 s
                 {
                     if (m_queueCount < kDelaySteps)
                     {
                         const uint64_t under = m_proc.ReferenceUnderruns();
                         m_queueAvgSteps[m_queueCount] = static_cast<int16_t>(std::lround(m_queueAvgAcc / m_queueMeters));
-                        m_queueMinSteps[m_queueCount] = static_cast<int16_t>(std::min(m_queueMinAcc, 32767));
-                        m_queueTrimSteps[m_queueCount] = static_cast<int32_t>(mt.refTrimmed - m_lastTrimmed);
+                        m_queueMinSteps[m_queueCount] = static_cast<int16_t>(std::clamp(std::lround(m_ppmAcc / m_queueMeters * 10.0), -32767L, 32767L));
+                        m_queueTrimSteps[m_queueCount] = static_cast<int32_t>(mt.refResyncs - m_lastTrimmed);
                         m_queueUnderSteps[m_queueCount] = static_cast<int32_t>(under - m_lastUnderruns);
-                        m_lastTrimmed = mt.refTrimmed;
+                        m_lastTrimmed = mt.refResyncs;
+                        m_lastTarget = mt.refTarget;
                         m_lastUnderruns = under;
                         ++m_queueCount;
                     }
                     m_queueMeters = 0;
                     m_queueAvgAcc = 0;
-                    m_queueMinAcc = INT_MAX;
+                    m_ppmAcc = 0;
                 }
             }
             if (m_telemetry)
@@ -932,6 +942,9 @@ STDMETHODIMP_(void) CEngineApo::AcceptInput(DWORD dwInputId, const APO_CONNECTIO
     if (silent)
         m_refSilentCalls.fetch_add(1, std::memory_order_relaxed);
     const float inv = 1.0f / static_cast<float>(m_refChannels);
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);   // stamps the reference writes (ReferenceSync follows their real rate)
+    const int64_t ticks = now.QuadPart;
     for (UINT32 done = 0; done < frames;)
     {
         const UINT32 n = std::min<UINT32>(frames - done, 1024);
@@ -943,7 +956,7 @@ STDMETHODIMP_(void) CEngineApo::AcceptInput(DWORD dwInputId, const APO_CONNECTIO
                     acc += src[(static_cast<size_t>(done) + i) * m_refChannels + c];
             mono[i] = acc * inv;
         }
-        const size_t written = m_ref.Write(mono, n);
+        const size_t written = m_ref.Write(mono, n, ticks);
         m_refDropped.fetch_add(n - written, std::memory_order_relaxed);
         done += n;
     }

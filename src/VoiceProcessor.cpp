@@ -15,6 +15,7 @@
 #include "speex/speex_resampler.h"
 
 static_assert(VoiceProcessor::kAecLatency % 3 == 0, "AEC stand-in delays each 16 kHz band by kAecLatency / 3");
+static_assert(VoiceProcessor::kPadLatency >= EchoTimingController::kMaxDelaySamples, "the mic delay must fit the latency budget");
 
 // ------------------------------------------------------------------ AEC3 instance
 
@@ -257,7 +258,7 @@ void VoiceProcessor::VarDelay::Run(const float* in, float* out, int n) noexcept
     }
 }
 
-void VoiceProcessor::MicDelay::Run(float* x, int from, int to) noexcept
+void VoiceProcessor::MicDelay::Run(float* x, int from, int to, int64_t rampStart) noexcept
 {
     constexpr size_t mask = kSize - 1;
     for (int i = 0; i < kBlock; ++i) buf[(w + i) & mask] = x[i];
@@ -271,17 +272,11 @@ void VoiceProcessor::MicDelay::Run(float* x, int from, int to) noexcept
         for (int i = 0; i < kBlock; ++i)
         {
             const float a = buf[(w + i - static_cast<size_t>(from)) & mask], b = buf[(w + i - static_cast<size_t>(to)) & mask];
-            x[i] = a + (b - a) * (static_cast<float>(i + 1) / kBlock);
+            const float t = std::clamp(static_cast<float>(i - rampStart + 1) / kBlock, 0.0f, 1.0f);
+            x[i] = a + (b - a) * t;
         }
     }
     w += kBlock;
-}
-
-int VoiceProcessor::LatencyFrames() const noexcept
-{
-    const int d = m_micDelayApplied.load(std::memory_order_relaxed);
-    if (d == 0 || m_rate == kSampleRate || m_rate <= 0) return m_latencyFrames + d;
-    return m_latencyFrames + static_cast<int>(std::lround(static_cast<double>(d) * m_rate / kSampleRate));
 }
 
 VoiceProcessor::EchoTimingEvent VoiceProcessor::EchoTimingTick() noexcept
@@ -368,9 +363,8 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
     m_aec = m_refRing ? std::make_unique<AecInstance>(initial.aecStrength, initial.aecRoom) : nullptr;
     m_hasAec.store(m_aec != nullptr);
     m_refUnderruns = 0;
-    m_refTrimmed = 0;
-    m_queueSum = 0;
-    m_queueMin = SIZE_MAX;
+    m_sync.Reset();
+    m_blockTicks = 0;
 
     // Automatic echo timing (only with a reference: without one there is no echo to line up).
     int delay = 0;
@@ -387,6 +381,9 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
     m_micDelayTarget.store(delay);
     m_micDelayApplied.store(delay);
     m_timing.Reset(delay);
+    m_pad = m_padTo = kPadLatency - delay;   // mic delay + padding = kPadLatency: the total never changes
+    m_padSwitchAt = 0;
+    m_blockIndex = 0;
 
     if (!m_limiter)
         m_limiter = std::make_unique<OutputLimiter>();
@@ -421,6 +418,7 @@ void VoiceProcessor::Reset() noexcept
     {
         c.dry.Clear();
         c.mic.Clear();
+        c.pad.Clear();
         c.in.fill(0.0f);
         c.out.fill(0.0f);
     }
@@ -477,8 +475,15 @@ void VoiceProcessor::ProcessBlock() noexcept
     m_agcHandoff.TakeInto(m_agc);
     m_aecHandoff.TakeInto(m_aec);
 
-    // Automatic echo timing: a new mic delay (from EchoTimingTick) starts at this block, crossfaded.
+    // Automatic echo timing: a new mic delay (from EchoTimingTick) starts at this block, crossfaded. The
+    // output padding changes the other way when this block's first sample reaches the end of the chain
+    // (kAlgorithmLatency later), so the total latency stays exactly kTotalLatency.
     const int delayFrom = m_micDelay, delayTo = m_micDelayTarget.load(std::memory_order_relaxed);
+    if (delayTo != delayFrom)
+    {
+        m_padTo = kPadLatency - delayTo;
+        m_padSwitchAt = static_cast<int64_t>(m_blockIndex) * kBlock + kAlgorithmLatency;
+    }
 
     const float invCh = 1.0f / static_cast<float>(m_channels);
     m_mono.fill(0.0f);
@@ -510,15 +515,8 @@ void VoiceProcessor::ProcessBlock() noexcept
     if (m_aec)
     {
         bool have = false;
-        if (m_refRing)
-        {
-            const size_t queued = m_refRing->Available();   // diagnostics: does the queue drift?
-            m_queueSum += static_cast<double>(queued);
-            m_queueMin = std::min(m_queueMin, queued);
-            if (queued > 4 * kBlock) m_refTrimmed += queued - 4 * kBlock;
-            m_refRing->TrimTo(4 * kBlock);  // bound the reference queue (AEC3 tracks the remaining delay)
-            have = m_refRing->Read(m_ref.data(), kBlock);
-        }
+        if (m_refRing)   // rate-locked to the microphone (see ReferenceSync.h)
+            have = m_sync.Pull(*m_refRing, m_ref.data(), kBlock, m_blockTicks, m_tickFreq);
         if (!have) { m_ref.fill(0.0f); ++m_refUnderruns; }
         if (m_probe && m_autoTiming)
             m_probe->Push(m_s1.data(), m_ref.data(), kBlock);   // the real reference, also while AEC is off
@@ -594,9 +592,15 @@ void VoiceProcessor::ProcessBlock() noexcept
         m_voice[i] += m_limMix.At(i) * (m_tmp[i] - m_voice[i]);
 
     // Mono voice to every channel; master bypass crossfades to the delayed original channels.
+    const int64_t blockStart = static_cast<int64_t>(m_blockIndex) * kBlock;
     for (auto& c : m_ch)
+    {
         for (int i = 0; i < kBlock; ++i)
             c.out[i] = c.delayed[i] + m_wet.At(i) * (m_voice[i] - c.delayed[i]);
+        c.pad.Run(c.out.data(), m_pad, m_padTo, m_padSwitchAt - blockStart);   // fixed total latency
+    }
+    if (m_pad != m_padTo && blockStart + kBlock >= m_padSwitchAt + kBlock)
+        m_pad = m_padTo;   // crossfade finished
 
     // Meters (every 10 blocks).
     for (int i = 0; i < kBlock; ++i)
@@ -629,11 +633,10 @@ void VoiceProcessor::ProcessBlock() noexcept
         m_meters.agcGainDb = m_settings.agcEnabled ? m_agc->LastGainDb() : 0.0f;
         m_meters.limiterDb = m_settings.limiterEnabled ? m_limPeakDb : 0.0f;
         m_meters.speech = m_speechSum / 10.0f;
-        m_meters.refQueueAvg = static_cast<float>(m_queueSum / 10.0);
-        m_meters.refQueueMin = m_queueMin == SIZE_MAX ? 0 : static_cast<int>(m_queueMin);
-        m_meters.refTrimmed = m_refTrimmed;
-        m_queueSum = 0;
-        m_queueMin = SIZE_MAX;
+        m_meters.refBacklog = m_sync.BacklogSamples();
+        m_meters.refTarget = m_sync.TargetSamples();
+        m_meters.refPpm = static_cast<float>(m_sync.RatioPpm());
+        m_meters.refResyncs = m_sync.Resyncs();
         m_metersReady = true;
         m_meterBlocks = 0;
         m_inSq = m_outSq = m_refSq = 0;
@@ -658,6 +661,7 @@ void VoiceProcessor::ProcessBlock() noexcept
         m_micDelay = delayTo;
         m_micDelayApplied.store(delayTo, std::memory_order_relaxed);
     }
+    ++m_blockIndex;
 }
 
 void VoiceProcessor::Process(const float* in, float* out, int frames, const Settings& s, float inputGainDb) noexcept
@@ -729,6 +733,9 @@ void VoiceProcessor::ProcessCore(const float* in, float* out, int frames, const 
         }
         if (++m_pos == kBlock)
         {
+            // Clock at this block's last sample (the call's clock is for its last frame).
+            if (m_tickFreq > 0)
+                m_blockTicks = m_callTicks - static_cast<int64_t>(frames - 1 - f) * m_tickFreq / kSampleRate;
             if (!(s == m_settings))
                 ApplySettings(s);
             ProcessBlock();

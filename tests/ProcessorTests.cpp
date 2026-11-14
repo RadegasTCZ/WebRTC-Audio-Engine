@@ -327,10 +327,11 @@ int main()
         vp.Prepare(kCh, 48000, st);
         std::vector<float> y(mic.size());
         const int n = static_cast<int>(mic.size() / kCh);
+        ring.Write(farEnd.data(), 480);   // the reference arrives one block ahead (a real system has a backlog)
         for (int pos = 0, k = 0; pos < n; pos += 480, ++k)
         {
             if (perBlock) perBlock(k, st);
-            ring.Write(farEnd.data() + pos, 480);
+            if (pos + 960 <= n) ring.Write(farEnd.data() + pos + 480, 480);
             vp.Process(mic.data() + static_cast<size_t>(pos) * kCh, y.data() + static_cast<size_t>(pos) * kCh, 480, st);
         }
         return y;
@@ -717,9 +718,10 @@ int main()
             r.latencyStart = vp.LatencyFrames();
             r.y.resize(mic.size());
             const int n = static_cast<int>(mic.size() / kCh);
+            ring.Write(farEnd.data(), 480);   // one block ahead, like runAec
             for (int pos = 0, k = 0; pos + 480 <= n; pos += 480, ++k)
             {
-                ring.Write(farEnd.data() + pos, 480);
+                if (pos + 960 <= n) ring.Write(farEnd.data() + pos + 480, 480);
                 vp.Process(mic.data() + static_cast<size_t>(pos) * kCh, r.y.data() + static_cast<size_t>(pos) * kCh, 480, st);
                 if (k % 100 == 99 && vp.EchoTimingTick().decision.change) ++r.changes;
             }
@@ -759,7 +761,7 @@ int main()
                         on.delay / 48.0, on.changes, on.latencyStart, on.latency, echo - withAuto, echo - without);
             EXPECT(on.delay >= 12 * 48 - 48 && on.delay <= 12 * 48 + 48, "delay %.2f ms, expected ~12", on.delay / 48.0);
             EXPECT(on.changes == 1, "%d delay changes, expected 1", on.changes);
-            EXPECT(on.latency == kLat + on.delay && on.latencyStart == kLat, "latency %d (start %d)", on.latency, on.latencyStart);
+            EXPECT(on.latency == kLat && on.latencyStart == kLat, "latency %d (start %d), expected the fixed %d", on.latency, on.latencyStart, kLat);
             EXPECT(echo - withAuto > (echo - without) + 10.0, "automatic timing gained only %.1f dB", without - withAuto);
             EXPECT(AllFinite(on.y), "non-finite output");
         }
@@ -789,8 +791,8 @@ int main()
             auto noRef = runTiming(imp, quiet, byp, true, 576, false);
             std::printf("    remembered 12 ms: impulse delay %d (reported %d); without reference reported %d\n", peakAt - 9600,
                         r.latencyStart, noRef.latencyStart);
-            EXPECT(peakAt - 9600 == kLat + 576 && r.latencyStart == kLat + 576, "remembered delay not applied/reported");
-            EXPECT(noRef.latencyStart == kLat, "delay applied without a reference");
+            EXPECT(peakAt - 9600 == kLat && r.latencyStart == kLat && noRef.latencyStart == kLat,
+                   "the total latency must stay %d with a remembered mic delay", kLat);
         }
         // f) the switch is crossfaded: no step in a 100 Hz tone (bypass shows the raw delayed mic).
         {
@@ -803,8 +805,14 @@ int main()
                 jumpIn = std::max(jumpIn, std::fabs(mic[i] - mic[i - kCh]));
                 jumpOut = std::max(jumpOut, std::fabs(r.y[i] - r.y[i - kCh]));
             }
-            std::printf("    switch (delay %.1f ms): largest sample step in %.4f, out %.4f\n", r.delay / 48.0, jumpIn, jumpOut);
+            // After the change the output is the input delayed by exactly kLat again (the padding moved too).
+            float err = 0;
+            for (size_t f = static_cast<size_t>(48000 * 20); f < mic.size() / kCh; ++f)
+                err = std::max(err, std::fabs(r.y[f * kCh] - mic[(f - kLat) * kCh]));
+            std::printf("    switch (delay %.1f ms): largest sample step in %.4f, out %.4f; output = input delayed %d afterwards: max error %.6f\n",
+                        r.delay / 48.0, jumpIn, jumpOut, kLat, err);
             EXPECT(r.changes == 1 && jumpOut < jumpIn * 1.5f, "audible step at the delay change");
+            EXPECT(err < 1e-6f, "output timing moved after a mic delay change (error %.6f)", err);
         }
         // g) the estimator's cost (it runs on a worker thread once per second).
         {
@@ -840,9 +848,10 @@ int main()
             const int block = rate / 100;
             std::vector<float> y(static_cast<size_t>(kCh) * block);
             std::vector<double> us;
+            ring.Write(farEnd.data(), 480);
             for (int pos = 0; pos + block <= n; pos += block)
             {
-                ring.Write(farEnd.data() + pos, 480);
+                if (pos + 960 <= n) ring.Write(farEnd.data() + pos + 480, 480);
                 const auto t0 = std::chrono::steady_clock::now();
                 vp.Process(mic.data() + static_cast<size_t>(pos) * kCh, y.data(), block, st);
                 us.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
@@ -869,6 +878,71 @@ int main()
         none.limiterEnabled = 0;
         bench("all switched off (reference kept)", none, true);
         bench("everything on, 32 kHz mic (resampled)", all, true, 32000);
+    }
+
+    std::printf("[20] reference sync: the reference arrives faster/slower than the mic consumes it (as measured: +62 ppm)\n");
+    {
+        // Event simulation on the capture clock (ticks = capture samples, 48000 per second). The playback side
+        // delivers 480-sample chunks every 480 / rate ticks, stamped; the capture side processes a block every
+        // 480 ticks. The mic hears the echo 30 ms after the sound was played. 6 minutes.
+        Settings st = def; st.nsEnabled = 0; st.hpfEnabled = 0; st.lpfEnabled = 0; st.limiterEnabled = 0;
+        constexpr int kSeconds = 360;
+        for (double ppm : {62.0, -150.0, 0.0})
+        {
+            const double rate = 1.0 + ppm * 1e-6;   // playback samples per capture sample
+            const int nCap = 48000 * kSeconds;
+            const int nPlay = static_cast<int>(nCap * rate) + 4800;
+            std::mt19937 rng(17);
+            std::normal_distribution<float> g(0.0f, 0.1f);
+            std::vector<float> played(static_cast<size_t>(nPlay));
+            for (int i = 0; i < nPlay; ++i) played[i] = ((i / 24000) % 5 < 3) ? g(rng) : 0.0f;
+            ReferenceRing ring;
+            ring.Init(48000);
+            VoiceProcessor vp;
+            vp.SetReference(&ring);
+            vp.SetEchoTimingSetup(false, 0);
+            vp.Prepare(kCh, 48000, st);
+            std::vector<float> mic(480 * kCh), y(480 * kCh);
+            double echoSq = 0, outSq = 0;
+            int nextChunk = 0;
+            float lp = 0;
+            for (int b = 0; b < nCap / 480; ++b)
+            {
+                const int64_t now = static_cast<int64_t>(b + 1) * 480;
+                // Deliver every playback chunk that has finished playing by now, stamped with when it finished
+                // (like AcceptInput: the stamp is always in the past).
+                while (static_cast<double>(nextChunk + 1) * 480 / rate <= static_cast<double>(now))
+                {
+                    const int64_t at = static_cast<int64_t>(std::llround((nextChunk + 1) * 480 / rate));
+                    ring.Write(played.data() + static_cast<size_t>(nextChunk) * 480, 480, at);
+                    ++nextChunk;
+                }
+                for (int i = 0; i < 480; ++i)
+                {
+                    // Capture sample (b*480+i) hears what was played 30 ms (1440 capture samples) earlier.
+                    const double tPlay = (static_cast<double>(b) * 480 + i - 1440) * rate;
+                    const float v = tPlay >= 0 ? played[static_cast<size_t>(tPlay)] : 0.0f;
+                    lp += 0.3f * (v - lp);
+                    for (int c = 0; c < kCh; ++c) mic[static_cast<size_t>(i) * kCh + c] = 0.5f * lp;
+                }
+                vp.SetClock(now, 48000);
+                vp.Process(mic.data(), y.data(), 480, st);
+                if (b >= (kSeconds - 60) * 100)   // the last minute
+                    for (int i = 0; i < 480; ++i)
+                    {
+                        echoSq += static_cast<double>(mic[static_cast<size_t>(i) * kCh]) * mic[static_cast<size_t>(i) * kCh];
+                        outSq += static_cast<double>(y[static_cast<size_t>(i) * kCh]) * y[static_cast<size_t>(i) * kCh];
+                    }
+            }
+            const double removed = 10.0 * std::log10((echoSq + 1e-20) / (outSq + 1e-20));
+            std::printf("    %+6.0f ppm: sync %+6.1f ppm, %llu resync(s), %llu dry block(s), backlog %.1f ms (target %.1f); echo removed in the 6th minute %.1f dB\n",
+                        ppm, vp.Sync().RatioPpm(), static_cast<unsigned long long>(vp.Sync().Resyncs()),
+                        static_cast<unsigned long long>(vp.ReferenceUnderruns()), vp.Sync().BacklogSamples() / 48.0,
+                        vp.Sync().TargetSamples() / 48.0, removed);
+            EXPECT(std::fabs(vp.Sync().RatioPpm() - ppm) < 5.0, "sync settled at %.1f ppm, expected %.0f", vp.Sync().RatioPpm(), ppm);
+            EXPECT(vp.Sync().Resyncs() == 0, "%llu resyncs", static_cast<unsigned long long>(vp.Sync().Resyncs()));
+            EXPECT(removed > 30.0, "only %.1f dB echo removed", removed);
+        }
     }
 
     std::printf(g_failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", g_failures);
