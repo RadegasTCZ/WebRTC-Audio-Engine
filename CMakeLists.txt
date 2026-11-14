@@ -30,6 +30,8 @@ add_library(voice_core STATIC
   src/AecConfig.h
   src/ReferenceRing.h
   src/EchoTimeline.h
+  src/EchoTiming.cpp
+  src/EchoTiming.h
 )
 target_include_directories(voice_core PUBLIC third_party/speexdsp)
 set_source_files_properties(third_party/speexdsp/resample.c PROPERTIES COMPILE_OPTIONS "/W0")
@@ -111,3 +113,4 @@ target_link_libraries(ClockProbe PRIVATE ole32)
 
 # Echo timing in an aecdump WAV (DiagDumpSeconds): does the echo arrive after the reference?
 add_executable(AecDumpXcorr tests/AecDumpXcorr.cpp)
+target_link_libraries(AecDumpXcorr PRIVATE voice_core)

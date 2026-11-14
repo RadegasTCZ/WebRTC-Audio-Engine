@@ -6,11 +6,15 @@
 // stream, play speech on the speakers, stop the stream -> aecdump-*.wav next to the engine log.
 // Usage: AecDumpXcorr.exe <aecdump.wav>
 // Coarse search at 8 kHz over +-600 ms in 10 s windows, then refined at 48 kHz.
+// Then replays the recording through the engine's automatic echo timing (probe -> estimator -> controller,
+// one measurement per second) and prints what it would decide.
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cmath>
 #include <vector>
+#include <memory>
+#include "../src/EchoTiming.h"
 
 int main(int argc, char** argv)
 {
@@ -60,5 +64,31 @@ int main(int argc, char** argv)
         std::printf("  %3zu-%3zu s  %+7.2f ms   %.2f\n", w0 / 8000, (w0 + win) / 8000, best48 / 48.0,
                     bestC / std::sqrt(refE * micE + 1e-30));
     }
+    std::printf("\n automatic echo timing (as the engine runs it, 1 measurement per s):\n");
+    std::printf("   time   valid  offset ms  quality  peak   frames  -> decision\n");
+    auto probe = std::make_unique<EchoTimingProbe>();
+    EchoTimingEstimator est;
+    EchoTimingController ctl;
+    ctl.Reset(0);
+    std::vector<float> m8(EchoTimingEstimator::kSpan), r8(EchoTimingEstimator::kSpan);
+    int delay = 0;
+    for (size_t pos = 0; pos + 480 <= n; pos += 480)
+    {
+        // The controller's delay is applied to the mic, like the engine does.
+        float blk[480];
+        for (int i = 0; i < 480; ++i) blk[i] = pos + i >= static_cast<size_t>(delay) ? mic[pos + i - delay] : 0.0f;
+        probe->Push(blk, &ref[pos], 480);
+        if ((pos / 480) % 100 == 99 && probe->Latest(m8.data(), r8.data(), m8.size()))
+        {
+            const EchoTimingResult r = est.Estimate(m8.data(), r8.data());
+            const auto d = ctl.OnResult(r);
+            std::printf("  %5.1f s   %d   %+8.2f   %6.1f   %.3f   %2d", (pos + 480) / 48000.0, r.valid ? 1 : 0, r.offsetMs, r.quality,
+                        r.peak, r.activeFrames);
+            if (d.change) { delay = d.delaySamples; std::printf("   -> mic delay %.1f ms (echo %+.2f ms)%s", delay / 48.0, d.rawOffsetMs, d.capped ? " CAPPED" : ""); }
+            else if (r.outOfRange) std::printf("   (out of range)");
+            std::printf("\n");
+        }
+    }
+    std::printf(" final mic delay %.1f ms\n", delay / 48.0);
     return 0;
 }

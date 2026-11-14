@@ -130,6 +130,20 @@ private:
     bool m_refFloat = false;
     std::atomic<uint64_t> m_refFrames{0}, m_refCalls{0}, m_refDropped{0}, m_refSilentCalls{0};
 
+    // Automatic echo timing: a thread-pool timer measures once per second while a stream with a reference
+    // runs (VoiceProcessor::EchoTimingTick); the mic delay is remembered per microphone for the next stream.
+    PTP_TIMER m_timingTimer = nullptr;
+    static void CALLBACK TimingTimerCallback(PTP_CALLBACK_INSTANCE, PVOID self, PTP_TIMER) noexcept;
+    void StartTimingTimer() noexcept;
+    void StopTimingTimer() noexcept;    // waits for a running callback
+    void OnTimingTick() noexcept;
+    // Touched only by the timer callback; read after StopTimingTimer.
+    int m_timingMeasured = 0, m_timingValid = 0, m_timingOutOfRange = 0, m_timingChanges = 0;
+    bool m_timingAgreedLogged = false;
+    EchoTimingResult m_timingLast{};
+    int m_latencyLogged = 0;            // GetLatency calls logged this stream
+    HNSTIME m_latencyLastLogged = -1;
+
     ::telemetry::Slot* m_telemetry = nullptr;  // this device's shared-memory meters for the tray app
     LONG64 m_telemetryKey = 0;
     wchar_t m_endpointName[64] = L"Microphone";

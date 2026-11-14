@@ -59,6 +59,59 @@ namespace
     }
 }
 
+// ---------------------------------------------------------------- Remembered mic delay (per microphone)
+// Kept in memory for this audio engine run and in the registry of the account audiodg runs as (LOCAL SERVICE:
+// HKCU = its own hive, not watched by the settings watcher), so the next stream on that microphone starts
+// lined up and reports its true latency right away.
+
+namespace
+{
+    constexpr wchar_t kTimingKey[] = L"Software\\WebrtcAudioEngine\\EchoTiming";
+    struct RememberedDelay { wchar_t device[64]; int samples; };
+    SRWLOCK g_rememberedLock = SRWLOCK_INIT;
+    RememberedDelay g_remembered[32] = {};
+
+    int LoadRememberedDelay(const wchar_t* device) noexcept
+    {
+        if (!device || !*device) return 0;
+        int found = -1;
+        AcquireSRWLockShared(&g_rememberedLock);
+        for (const auto& r : g_remembered)
+            if (r.device[0] && _wcsicmp(r.device, device) == 0) { found = r.samples; break; }
+        ReleaseSRWLockShared(&g_rememberedLock);
+        if (found >= 0) return found;
+        DWORD v = 0, size = sizeof(v);
+        if (RegGetValueW(HKEY_CURRENT_USER, kTimingKey, device, RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS)
+            return static_cast<int>(std::min<DWORD>(v, EchoTimingController::kMaxDelaySamples));
+        return 0;
+    }
+
+    void RememberDelay(const wchar_t* device, int samples) noexcept
+    {
+        if (!device || !*device) return;
+        AcquireSRWLockExclusive(&g_rememberedLock);
+        RememberedDelay* slot = nullptr;
+        for (auto& r : g_remembered)
+            if (r.device[0] && _wcsicmp(r.device, device) == 0) { slot = &r; break; }
+        if (!slot)
+            for (auto& r : g_remembered)
+                if (!r.device[0]) { slot = &r; break; }
+        if (slot)
+        {
+            wcsncpy_s(slot->device, device, _TRUNCATE);
+            slot->samples = samples;
+        }
+        ReleaseSRWLockExclusive(&g_rememberedLock);
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, kTimingKey, 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr) == ERROR_SUCCESS)
+        {
+            const DWORD v = static_cast<DWORD>(samples);
+            RegSetValueExW(key, device, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
+            RegCloseKey(key);
+        }
+    }
+}
+
 CEngineApo::CEngineApo(IUnknown* outer) noexcept
     : CBaseAudioProcessingObject(&g_regPack.m_Properties),
       m_instanceId(++s_nextInstance)
@@ -73,6 +126,9 @@ CEngineApo::CEngineApo(IUnknown* outer) noexcept
 
 CEngineApo::~CEngineApo()
 {
+    StopTimingTimer();
+    if (m_timingTimer)
+        CloseThreadpoolTimer(m_timingTimer);
     ForgetFxEvents(this);
     if (m_device)
         m_device->Release();
@@ -248,7 +304,16 @@ STDMETHODIMP CEngineApo::GetLatency(HNSTIME* pTime)
     if (!pTime)
         return E_POINTER;
     // HNSTIME is in 100 ns units.
+    // Includes the automatic mic delay (remembered from the last stream on this microphone, or changed since).
     *pTime = m_proc.IsActive() ? static_cast<HNSTIME>(m_proc.LatencyFrames()) * 10000000 / m_proc.SampleRate() : 0;
+    // Logged (first calls of a stream, and whenever the value changed) to learn when Windows asks.
+    if (m_proc.IsActive() && (m_latencyLogged < 3 || *pTime != m_latencyLastLogged) && m_latencyLogged < 50)
+    {
+        ++m_latencyLogged;
+        m_latencyLastLogged = *pTime;
+        apolog::Write(L"[%s #%ld] GetLatency -> %.2f ms (%d frames, mic delay %.1f ms)", SlotName(), m_instanceId, *pTime / 10000.0,
+                      m_proc.LatencyFrames(), m_proc.MicDelaySamples() / 48.0);
+    }
     return S_OK;
 }
 
@@ -329,7 +394,10 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
     m_delayCount = m_delayMeters = 0;
     m_dumpArmed = false;
     m_lockTick = GetTickCount64();
+    m_latencyLogged = 0;
+    m_latencyLastLogged = -1;
 
+    StopTimingTimer();
     m_proc.Deactivate();
     if (m_device)
     {
@@ -369,6 +437,16 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
                                               u32NumOutputConnections ? ppOutputConnections[0]->u32MaxFrameCount : 0u);
             // Echo reference attached by AddAuxiliaryInput (its ring was allocated in Initialize).
             m_proc.SetReference(m_refActive.load() ? &m_ref : nullptr);
+            // Automatic echo timing: on unless HKLM\SOFTWARE\WebrtcVoiceApo\AutoMicDelay = 0 (for A/B tests).
+            DWORD autoTiming = 1, atSize = sizeof(autoTiming);
+            if (RegGetValueW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, L"AutoMicDelay", RRF_RT_REG_DWORD, nullptr, &autoTiming,
+                             &atSize) != ERROR_SUCCESS)
+                autoTiming = 1;
+            const int remembered = autoTiming ? LoadRememberedDelay(m_deviceGuid) : 0;
+            m_proc.SetEchoTimingSetup(autoTiming != 0, remembered);
+            m_timingMeasured = m_timingValid = m_timingOutOfRange = m_timingChanges = 0;
+            m_timingAgreedLogged = false;
+            m_timingLast = {};
             // Per-device meters for the tray app (non-RT). Claim again if another device took our slot meanwhile.
             m_telemetryKey = telemetry::KeyOf(m_endpointKey);
             if (!telemetry::Owns(m_telemetry, m_telemetryKey))
@@ -384,6 +462,14 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
                 m_proc.Deactivate();
                 apolog::Write(L"[%s #%ld] processing off: out of memory while preparing", SlotName(), m_instanceId);
             }
+            if (ok && m_proc.EchoTimingActive())
+            {
+                StartTimingTimer();
+                apolog::Write(L"[%s #%ld] echo timing: automatic, starting with %s mic delay %.1f ms", SlotName(), m_instanceId,
+                              remembered ? L"the remembered" : L"no", m_proc.MicDelaySamples() / 48.0);
+            }
+            else if (ok && m_proc.HasAec() && !autoTiming)
+                apolog::Write(L"[%s #%ld] echo timing: automatic mic delay OFF (AutoMicDelay = 0)", SlotName(), m_instanceId);
             if (ok && m_proc.HasAec())
             {
                 // Diagnostics, off unless asked for: HKLM\SOFTWARE\WebrtcVoiceApo\DiagDumpSeconds = 1..120 records
@@ -423,6 +509,19 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
 STDMETHODIMP CEngineApo::UnlockForProcess()
 {
     const double seconds = (GetTickCount64() - m_lockTick) / 1000.0;
+    const bool timing = m_timingTimer != nullptr && m_proc.EchoTimingActive();
+    StopTimingTimer();
+    if (timing)
+    {
+        const int delay = m_proc.MicDelaySamples();
+        if (m_timingAgreedLogged)
+            RememberDelay(m_deviceGuid, delay);   // also a 0: the next stream must not keep a stale delay
+        apolog::Write(L"[%s #%ld] echo timing: %d measurements (%d clear, %d out of range), %d change(s), mic delay %.1f ms%s, "
+                      L"last: echo %+.2f ms vs reference as AEC3 sees it, quality %.0f", SlotName(), m_instanceId, m_timingMeasured,
+                      m_timingValid, m_timingOutOfRange, m_timingChanges, delay / 48.0,
+                      m_timingAgreedLogged ? L" (remembered for the next stream)" : L" (no agreed timing this stream)",
+                      m_timingLast.offsetMs, m_timingLast.quality);
+    }
     if (m_refActive.load())
     {
         // "dropped": reference that arrived while capture was paused (the queue keeps at most 1 s).
@@ -491,6 +590,67 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
                   SlotName(), m_instanceId, ModeName(m_mode), seconds, m_processCalls, m_validFrames, m_silentCalls,
                   m_maxPeriod ? m_minPeriod : 0, m_maxPeriod, peakDb, m_proc.Underruns());
     return CBaseAudioProcessingObject::UnlockForProcess();
+}
+
+// ---------------------------------------------------------------- Automatic echo timing (timer, non-RT)
+
+void CALLBACK CEngineApo::TimingTimerCallback(PTP_CALLBACK_INSTANCE, PVOID self, PTP_TIMER) noexcept
+{
+    static_cast<CEngineApo*>(self)->OnTimingTick();
+}
+
+void CEngineApo::StartTimingTimer() noexcept
+{
+    if (!m_timingTimer)
+        m_timingTimer = CreateThreadpoolTimer(&CEngineApo::TimingTimerCallback, this, nullptr);
+    if (!m_timingTimer)
+    {
+        apolog::Write(L"[%s #%ld] echo timing: no timer (error %lu), automatic timing off", SlotName(), m_instanceId, GetLastError());
+        return;
+    }
+    // Every 1000 ms (the controller's settle time counts in these ticks), first after 1 s, 100 ms slack.
+    ULARGE_INTEGER due;
+    due.QuadPart = static_cast<ULONGLONG>(-10000000LL);   // relative 1 s
+    FILETIME ft{due.LowPart, due.HighPart};
+    SetThreadpoolTimer(m_timingTimer, &ft, 1000, 100);
+}
+
+void CEngineApo::StopTimingTimer() noexcept
+{
+    if (!m_timingTimer)
+        return;
+    SetThreadpoolTimer(m_timingTimer, nullptr, 0, 0);
+    WaitForThreadpoolTimerCallbacks(m_timingTimer, TRUE);
+}
+
+void CEngineApo::OnTimingTick() noexcept
+{
+    const VoiceProcessor::EchoTimingEvent ev = m_proc.EchoTimingTick();
+    if (!ev.measured)
+        return;
+    ++m_timingMeasured;
+    if (ev.result.valid) { ++m_timingValid; m_timingLast = ev.result; }
+    if (ev.result.outOfRange)
+    {
+        if (++m_timingOutOfRange == 1)
+            apolog::Write(L"[%s #%ld] echo timing: clear echo at %+.1f ms, outside the range we act on (quality %.0f)", SlotName(),
+                          m_instanceId, ev.result.offsetMs, ev.result.quality);
+    }
+    if (ev.decision.change)
+    {
+        ++m_timingChanges;
+        apolog::Write(L"[%s #%ld] echo timing: echo %+.2f ms vs reference (quality %.0f) -> mic delayed %.1f ms%s", SlotName(),
+                      m_instanceId, ev.decision.rawOffsetMs, ev.result.quality, ev.decision.delaySamples / 48.0,
+                      ev.decision.capped ? L" (CAPPED at the 20 ms maximum)" : L"");
+        RememberDelay(m_deviceGuid, ev.decision.delaySamples);
+        m_timingAgreedLogged = true;
+    }
+    else if (ev.agreed && !m_timingAgreedLogged)
+    {
+        m_timingAgreedLogged = true;
+        apolog::Write(L"[%s #%ld] echo timing: echo %+.2f ms vs reference (quality %.0f) -> mic delay %.1f ms is right, no change",
+                      SlotName(), m_instanceId, ev.decision.rawOffsetMs, ev.result.quality, ev.delaySamples / 48.0);
+    }
 }
 
 // ---------------------------------------------------------------- Real-time processing

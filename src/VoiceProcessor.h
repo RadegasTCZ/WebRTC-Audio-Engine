@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 #include "AgcStage.h"
+#include "EchoTiming.h"
 #include "ReferenceRing.h"
 #include "Settings.h"
 
@@ -26,6 +27,9 @@ namespace webrtc { class AudioBuffer; class EchoControl; class NoiseSuppressor; 
 // - AGC2 / AEC3 parameter changes rebuild those stages on the settings watcher thread (they allocate);
 //   the real-time thread swaps them in at a block boundary.
 // - Other sample rates are resampled to 48 kHz and back (SpeexDSP) with constant latency.
+// - Automatic echo timing (streams with a reference): if the echo reaches the mic too early for AEC3,
+//   every input channel is delayed (0..20 ms, crossfaded) in front of the whole chain. EchoTimingTick()
+//   measures and decides on a non-RT thread; see EchoTiming.h.
 //
 // Threading: Prepare()/SetReference() allocate or configure (LockForProcess). Process() never
 // allocates, locks or blocks.
@@ -59,7 +63,24 @@ public:
     // Which settings snapshot this processor follows (settings::RegisterDevice; -1 = defaults).
     void SetSettingsIndex(int index) noexcept { m_settingsIndex = index; }
 
-    int LatencyFrames() const noexcept { return m_latencyFrames; }
+    // Includes the current automatic mic delay (in device frames).
+    int LatencyFrames() const noexcept;
+
+    // Automatic echo timing. Call before Prepare (non-RT). initialDelay = 48 kHz samples remembered for this
+    // microphone (applied from the first block and included in the latency); ignored without a reference.
+    void SetEchoTimingSetup(bool automatic, int initialDelay) noexcept { m_autoTiming = automatic; m_initialMicDelay = initialDelay; }
+    struct EchoTimingEvent
+    {
+        bool measured = false;                 // a measurement ran (enough audio collected)
+        EchoTimingResult result;
+        EchoTimingController::Decision decision;
+        int delaySamples = 0;                  // the delay after this tick (48 kHz samples)
+        bool agreed = false;                   // the controller has an agreed echo timing this stream
+    };
+    // Non-RT, about once per second, from ONE thread, only while active (stop it before Prepare/Deactivate).
+    EchoTimingEvent EchoTimingTick() noexcept;
+    int MicDelaySamples() const noexcept { return m_micDelayApplied.load(std::memory_order_relaxed); }
+    bool EchoTimingActive() const noexcept { return m_probe != nullptr && m_refRing != nullptr && m_autoTiming; }
     int SampleRate() const noexcept { return m_rate; }
     uint64_t Underruns() const noexcept { return m_underruns; }
     uint64_t ReferenceUnderruns() const noexcept { return m_refUnderruns; }
@@ -161,9 +182,18 @@ private:
             current.reset(fresh);
         }
     };
+    struct MicDelay  // 0..20 ms, changes crossfade over one block
+    {
+        static constexpr size_t kSize = 2048;   // > max delay + one block, power of two
+        std::array<float, kSize> buf{};
+        size_t w = 0;
+        void Clear() noexcept { buf.fill(0.0f); w = 0; }
+        void Run(float* x, int from, int to) noexcept;   // one block, in place
+    };
     struct Channel
     {
         VarDelay dry;
+        MicDelay mic;
         std::array<float, kBlock> in{}, out{}, delayed{};
     };
 
@@ -222,6 +252,17 @@ private:
 
     std::unique_ptr<Resampling> m_rs;   // null at 48 kHz
     int m_rate = 0;
-    int m_latencyFrames = 0;
+    int m_latencyFrames = 0;   // without the mic delay
+
+    // Automatic echo timing.
+    bool m_autoTiming = true;
+    int m_initialMicDelay = 0;
+    int m_micDelay = 0;                          // RT: applied
+    std::atomic<int> m_micDelayTarget{0};        // tick -> RT
+    std::atomic<int> m_micDelayApplied{0};       // RT -> anyone (latency, logs)
+    std::unique_ptr<EchoTimingProbe> m_probe;    // allocated in Prepare when there is a reference
+    std::unique_ptr<EchoTimingEstimator> m_estimator;
+    EchoTimingController m_timing;
+    std::vector<float> m_t8mic, m_t8ref;
     uint64_t m_underruns = 0;
 };

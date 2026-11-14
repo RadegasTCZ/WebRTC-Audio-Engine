@@ -701,7 +701,124 @@ int main()
         EXPECT(finite && level > -60.0, "NaN slider corrupted the output");
     }
 
-    std::printf("[18] cost per 10 ms block on this machine (informational; the audio thread has 10 ms)\n");
+    std::printf("[18] automatic echo timing: an echo that comes too early is lined up, everything else is left alone\n");
+    {
+        struct TimingRun { std::vector<float> y; int delay = 0; int changes = 0; int latency = 0; int latencyStart = 0; };
+        // Runs with a tick every 100 blocks (1 s), like the effect's timer.
+        auto runTiming = [&](const std::vector<float>& mic, const std::vector<float>& farEnd, Settings st, bool automatic,
+                             int initial = 0, bool withRef = true) {
+            ReferenceRing ring;
+            ring.Init(48000);
+            VoiceProcessor vp;
+            vp.SetReference(withRef ? &ring : nullptr);
+            vp.SetEchoTimingSetup(automatic, initial);
+            vp.Prepare(kCh, 48000, st);
+            TimingRun r;
+            r.latencyStart = vp.LatencyFrames();
+            r.y.resize(mic.size());
+            const int n = static_cast<int>(mic.size() / kCh);
+            for (int pos = 0, k = 0; pos + 480 <= n; pos += 480, ++k)
+            {
+                ring.Write(farEnd.data() + pos, 480);
+                vp.Process(mic.data() + static_cast<size_t>(pos) * kCh, r.y.data() + static_cast<size_t>(pos) * kCh, 480, st);
+                if (k % 100 == 99 && vp.EchoTimingTick().decision.change) ++r.changes;
+            }
+            r.delay = vp.MicDelaySamples();
+            r.latency = vp.LatencyFrames();
+            return r;
+        };
+        const int n = 48000 * 24;
+        std::mt19937 rng(31);
+        std::normal_distribution<float> g(0.0f, 0.1f);
+        std::vector<float> farEnd(n, 0.0f);
+        for (int f = 0; f < n; ++f) if ((f / 24000) % 5 < 3) farEnd[f] = g(rng);
+        // Echo = low-passed far end at -6 dB, `shift` samples AFTER the reference (negative = before).
+        auto makeMic = [&](int shift, float nearSineAmp, float echoGain) {
+            std::vector<float> mic(static_cast<size_t>(kCh) * n, 0.0f);
+            float lp = 0.0f;
+            for (int f = 0; f < n; ++f)
+            {
+                const int src = f - shift;
+                lp += 0.3f * ((src >= 0 && src < n ? farEnd[src] : 0.0f) - lp);
+                const float v = echoGain * lp + nearSineAmp * std::sin(2.0f * 3.14159265f * 100.0f * f / 48000.0f);
+                for (int c = 0; c < kCh; ++c) mic[static_cast<size_t>(f) * kCh + c] = v;
+            }
+            return mic;
+        };
+        Settings st = def; st.nsEnabled = 0; st.hpfEnabled = 0; st.lpfEnabled = 0; st.limiterEnabled = 0;
+        const size_t e0 = static_cast<size_t>(48000 * 18) * kCh, e1 = static_cast<size_t>(48000 * 23) * kCh;
+
+        // a) echo 4 ms BEFORE the reference -> mic delayed ~12 ms, and the echo is removed much better.
+        {
+            auto mic = makeMic(-192, 0.0f, 0.5f);
+            auto on = runTiming(mic, farEnd, st, true), off = runTiming(mic, farEnd, st, false);
+            auto aecOff = st; aecOff.aecEnabled = 0;
+            auto raw = runTiming(mic, farEnd, aecOff, false);
+            const double echo = RmsDb(raw.y, e0, e1), withAuto = RmsDb(on.y, e0, e1), without = RmsDb(off.y, e0, e1);
+            std::printf("    echo -4 ms: mic delay %.1f ms (%d change), latency %d -> %d; echo removed %.1f dB with vs %.1f dB without\n",
+                        on.delay / 48.0, on.changes, on.latencyStart, on.latency, echo - withAuto, echo - without);
+            EXPECT(on.delay >= 12 * 48 - 48 && on.delay <= 12 * 48 + 48, "delay %.2f ms, expected ~12", on.delay / 48.0);
+            EXPECT(on.changes == 1, "%d delay changes, expected 1", on.changes);
+            EXPECT(on.latency == kLat + on.delay && on.latencyStart == kLat, "latency %d (start %d)", on.latency, on.latencyStart);
+            EXPECT(echo - withAuto > (echo - without) + 10.0, "automatic timing gained only %.1f dB", without - withAuto);
+            EXPECT(AllFinite(on.y), "non-finite output");
+        }
+        // b) echo 16 ms after the reference (the built-in mic): untouched.
+        {
+            auto r = runTiming(makeMic(768, 0.0f, 0.5f), farEnd, st, true);
+            std::printf("    echo +16 ms: mic delay %.1f ms\n", r.delay / 48.0);
+            EXPECT(r.delay == 0 && r.changes == 0, "delay %d changes %d", r.delay, r.changes);
+        }
+        // c) speakers silent, and d) speakers playing but no echo in the mic (headset): untouched.
+        {
+            std::vector<float> silent(n, 0.0f);
+            auto r1 = runTiming(makeMic(-192, 0.0f, 0.5f), silent, st, true);
+            auto noise = Noise(n, -40.0f, 77);
+            auto r2 = runTiming(noise, farEnd, st, true);
+            std::printf("    speakers silent: delay %.1f ms; no echo in the mic: delay %.1f ms\n", r1.delay / 48.0, r2.delay / 48.0);
+            EXPECT(r1.delay == 0 && r2.delay == 0, "delay without an echo (%d / %d)", r1.delay, r2.delay);
+        }
+        // e) remembered delay: applied from the first sample and reported; ignored without a reference.
+        {
+            Settings byp = st; byp.bypass = 1;
+            std::vector<float> imp(static_cast<size_t>(kCh) * 48000, 0.0f), quiet(48000, 0.0f);
+            for (int c = 0; c < kCh; ++c) imp[static_cast<size_t>(9600) * kCh + c] = 0.5f;
+            auto r = runTiming(imp, quiet, byp, true, 576);
+            int peakAt = -1;
+            for (int f = 0; f < 48000; ++f) if (r.y[static_cast<size_t>(f) * kCh] > 0.25f) { peakAt = f; break; }
+            auto noRef = runTiming(imp, quiet, byp, true, 576, false);
+            std::printf("    remembered 12 ms: impulse delay %d (reported %d); without reference reported %d\n", peakAt - 9600,
+                        r.latencyStart, noRef.latencyStart);
+            EXPECT(peakAt - 9600 == kLat + 576 && r.latencyStart == kLat + 576, "remembered delay not applied/reported");
+            EXPECT(noRef.latencyStart == kLat, "delay applied without a reference");
+        }
+        // f) the switch is crossfaded: no step in a 100 Hz tone (bypass shows the raw delayed mic).
+        {
+            Settings byp = st; byp.bypass = 1;
+            auto mic = makeMic(-192, 0.2f, 0.05f);
+            auto r = runTiming(mic, farEnd, byp, true);
+            float jumpIn = 0, jumpOut = 0;
+            for (size_t i = kCh; i < mic.size(); i += kCh)
+            {
+                jumpIn = std::max(jumpIn, std::fabs(mic[i] - mic[i - kCh]));
+                jumpOut = std::max(jumpOut, std::fabs(r.y[i] - r.y[i - kCh]));
+            }
+            std::printf("    switch (delay %.1f ms): largest sample step in %.4f, out %.4f\n", r.delay / 48.0, jumpIn, jumpOut);
+            EXPECT(r.changes == 1 && jumpOut < jumpIn * 1.5f, "audible step at the delay change");
+        }
+        // g) the estimator's cost (it runs on a worker thread once per second).
+        {
+            EchoTimingEstimator est;
+            std::vector<float> a(EchoTimingEstimator::kSpan), b(EchoTimingEstimator::kSpan);
+            for (size_t i = 0; i < a.size(); ++i) { a[i] = g(rng); b[i] = g(rng); }
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < 20; ++i) est.Estimate(a.data(), b.data());
+            const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count() / 20;
+            std::printf("    one measurement: %.0f us (once per second, off the audio thread)\n", us);
+        }
+    }
+
+    std::printf("[19] cost per 10 ms block on this machine (informational; the audio thread has 10 ms)\n");
     {
         std::printf("    CPU: AVX2 %s (WebRTC picks its AVX2 kernels at runtime; SSE2 otherwise)\n",
                     webrtc::cpu_info::Supports(webrtc::cpu_info::ISA::kAVX2) ? "detected" : "not detected");

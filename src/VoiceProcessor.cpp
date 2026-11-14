@@ -257,6 +257,51 @@ void VoiceProcessor::VarDelay::Run(const float* in, float* out, int n) noexcept
     }
 }
 
+void VoiceProcessor::MicDelay::Run(float* x, int from, int to) noexcept
+{
+    constexpr size_t mask = kSize - 1;
+    for (int i = 0; i < kBlock; ++i) buf[(w + i) & mask] = x[i];
+    if (from == to)
+    {
+        if (from != 0)
+            for (int i = 0; i < kBlock; ++i) x[i] = buf[(w + i - static_cast<size_t>(from)) & mask];
+    }
+    else
+    {
+        for (int i = 0; i < kBlock; ++i)
+        {
+            const float a = buf[(w + i - static_cast<size_t>(from)) & mask], b = buf[(w + i - static_cast<size_t>(to)) & mask];
+            x[i] = a + (b - a) * (static_cast<float>(i + 1) / kBlock);
+        }
+    }
+    w += kBlock;
+}
+
+int VoiceProcessor::LatencyFrames() const noexcept
+{
+    const int d = m_micDelayApplied.load(std::memory_order_relaxed);
+    if (d == 0 || m_rate == kSampleRate || m_rate <= 0) return m_latencyFrames + d;
+    return m_latencyFrames + static_cast<int>(std::lround(static_cast<double>(d) * m_rate / kSampleRate));
+}
+
+VoiceProcessor::EchoTimingEvent VoiceProcessor::EchoTimingTick() noexcept
+{
+    EchoTimingEvent ev;
+    ev.delaySamples = m_timing.Delay();
+    if (!m_active || !EchoTimingActive() || !m_estimator)
+        return ev;
+    if (!m_probe->Latest(m_t8mic.data(), m_t8ref.data(), EchoTimingEstimator::kSpan))
+        return ev;
+    ev.measured = true;
+    ev.result = m_estimator->Estimate(m_t8mic.data(), m_t8ref.data());
+    ev.decision = m_timing.OnResult(ev.result);
+    if (ev.decision.change)
+        m_micDelayTarget.store(ev.decision.delaySamples, std::memory_order_relaxed);
+    ev.delaySamples = m_timing.Delay();
+    ev.agreed = m_timing.HasAgreed();
+    return ev;
+}
+
 // ------------------------------------------------------------------ lifecycle
 
 VoiceProcessor::VoiceProcessor() = default;
@@ -324,6 +369,22 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
     m_hasAec.store(m_aec != nullptr);
     m_refUnderruns = 0;
 
+    // Automatic echo timing (only with a reference: without one there is no echo to line up).
+    int delay = 0;
+    if (m_refRing && m_autoTiming)
+    {
+        if (!m_probe) m_probe = std::make_unique<EchoTimingProbe>();
+        if (!m_estimator) m_estimator = std::make_unique<EchoTimingEstimator>();
+        m_t8mic.resize(EchoTimingEstimator::kSpan);
+        m_t8ref.resize(EchoTimingEstimator::kSpan);
+        m_probe->Clear();
+        delay = std::clamp(m_initialMicDelay, 0, EchoTimingController::kMaxDelaySamples);
+    }
+    m_micDelay = delay;
+    m_micDelayTarget.store(delay);
+    m_micDelayApplied.store(delay);
+    m_timing.Reset(delay);
+
     if (!m_limiter)
         m_limiter = std::make_unique<OutputLimiter>();
     m_agcHandoff.Clear();
@@ -356,6 +417,7 @@ void VoiceProcessor::Reset() noexcept
     for (auto& c : m_ch)
     {
         c.dry.Clear();
+        c.mic.Clear();
         c.in.fill(0.0f);
         c.out.fill(0.0f);
     }
@@ -412,17 +474,22 @@ void VoiceProcessor::ProcessBlock() noexcept
     m_agcHandoff.TakeInto(m_agc);
     m_aecHandoff.TakeInto(m_aec);
 
+    // Automatic echo timing: a new mic delay (from EchoTimingTick) starts at this block, crossfaded.
+    const int delayFrom = m_micDelay, delayTo = m_micDelayTarget.load(std::memory_order_relaxed);
+
     const float invCh = 1.0f / static_cast<float>(m_channels);
     m_mono.fill(0.0f);
     for (auto& c : m_ch)
     {
-        // Sanitize, apply the input gain (also in bypass: it is the volume control), downmix.
+        // Sanitize, apply the input gain (also in bypass: it is the volume control), delay, downmix.
         for (int i = 0; i < kBlock; ++i)
         {
             const float x = c.in[i];
             c.in[i] = (std::isfinite(x) ? x : 0.0f) * m_gain.At(i);
-            m_mono[i] += c.in[i] * invCh;
         }
+        c.mic.Run(c.in.data(), delayFrom, delayTo);   // before everything, so bypass stays aligned
+        for (int i = 0; i < kBlock; ++i)
+            m_mono[i] += c.in[i] * invCh;
         c.dry.Run(c.in.data(), c.delayed.data(), kBlock);  // latency-matched original channel (bypass)
     }
 
@@ -446,6 +513,8 @@ void VoiceProcessor::ProcessBlock() noexcept
             have = m_refRing->Read(m_ref.data(), kBlock);
         }
         if (!have) { m_ref.fill(0.0f); ++m_refUnderruns; }
+        if (m_probe && m_autoTiming)
+            m_probe->Push(m_s1.data(), m_ref.data(), kBlock);   // the real reference, also while AEC is off
         if (!m_settings.aecEnabled) m_ref.fill(0.0f);
         if (!m_dump.empty())  // diagnostics: what AEC3 sees (capture, reference), no allocation
         {
@@ -572,6 +641,11 @@ void VoiceProcessor::ProcessBlock() noexcept
     m_limMix.Finish();
     m_wet.Finish();
     m_gain.Finish();
+    if (delayTo != delayFrom)
+    {
+        m_micDelay = delayTo;
+        m_micDelayApplied.store(delayTo, std::memory_order_relaxed);
+    }
 }
 
 void VoiceProcessor::Process(const float* in, float* out, int frames, const Settings& s, float inputGainDb) noexcept
