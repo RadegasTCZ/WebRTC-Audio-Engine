@@ -68,9 +68,35 @@ namespace
         return s;
     }
 
-    std::wstring DevicePath(const wchar_t* device)
+    // Fixed buffer, no allocation: these paths are built inside noexcept functions that run in audiodg.
+    struct DevicePath
     {
-        return std::wstring(settings::kRegistryPath) + L"\\Devices\\" + device;
+        wchar_t path[160];
+        explicit DevicePath(const wchar_t* device) noexcept
+        {
+            path[0] = 0;
+            swprintf(path, std::size(path), L"%s\\Devices\\%.64s", settings::kRegistryPath, device);
+        }
+        const wchar_t* c_str() const noexcept { return path; }
+    };
+
+    // Devices\{guid} subkeys can be created by any user, so one could be a registry link pointing at
+    // another key. REG_OPTION_OPEN_LINK opens the link itself; we then refuse it instead of writing there.
+    LONG CreateDeviceKey(const wchar_t* device, HKEY* key) noexcept
+    {
+        *key = nullptr;
+        LONG err = RegCreateKeyExW(HKEY_LOCAL_MACHINE, DevicePath(device).c_str(), 0, nullptr, REG_OPTION_OPEN_LINK,
+                                   KEY_SET_VALUE | KEY_QUERY_VALUE, nullptr, key, nullptr);
+        if (err != ERROR_SUCCESS)
+            return err;
+        DWORD type = 0;
+        if (RegQueryValueExW(*key, L"SymbolicLinkValue", nullptr, &type, nullptr, nullptr) == ERROR_SUCCESS && type == REG_LINK)
+        {
+            RegCloseKey(*key);
+            *key = nullptr;
+            return ERROR_ACCESS_DENIED;
+        }
+        return ERROR_SUCCESS;
     }
 
     // Applies every value present under `path` onto `s` (missing values keep what `s` has).
@@ -141,13 +167,27 @@ namespace
                       s.aecStrength, s.aecRoom);
     }
 
-    void Arm() noexcept
+    std::atomic<bool> g_keyLost{false};  // the watched key was deleted: reopen it when it exists again
+
+    bool Arm() noexcept
     {
         // Watch the whole tree: per-device subkeys live under Devices\. THREAD_AGNOSTIC: we arm from
         // thread-pool threads, which may exit (without it, every thread exit fires a spurious change).
+        return g_key &&
+               RegNotifyChangeKeyValue(g_key, TRUE, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_THREAD_AGNOSTIC,
+                                       g_event, TRUE) == ERROR_SUCCESS;
+    }
+
+    // With g_changeLock held. The key was deleted (reinstall, a user): watch the new one if it exists.
+    bool Reopen() noexcept
+    {
+        HKEY key = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, 0, KEY_NOTIFY | KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+            return false;
         if (g_key)
-            RegNotifyChangeKeyValue(g_key, TRUE, REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_THREAD_AGNOSTIC,
-                                    g_event, TRUE);
+            RegCloseKey(g_key);
+        g_key = key;
+        return Arm();
     }
 
     void CALLBACK OnChanged(PVOID, BOOLEAN) noexcept
@@ -157,7 +197,16 @@ namespace
         // Callbacks can overlap (the re-arm above can fire while this one runs): Store() has a single
         // writer per snapshot, and the hook must see changes in order.
         AcquireSRWLockExclusive(&g_changeLock);
-        Arm();
+        // Coalesce bursts (the app writes ~17 values per change; a script may flip values in a loop): every
+        // value written during this pause is picked up by the one read below, so stages are rebuilt once.
+        Sleep(150);
+        if (!Arm() && !Reopen())
+        {
+            if (!g_keyLost.exchange(true))
+                apolog::Write(L"[settings] settings key deleted: live updates paused until it exists again");
+        }
+        else if (g_keyLost.exchange(false))
+            apolog::Write(L"[settings] settings key back: live updates resumed");
         bool any = false;
         AcquireSRWLockShared(&g_snapLock);
         for (int i = 0; i <= settings::kMaxDevices; ++i)
@@ -211,7 +260,7 @@ LONG Settings::WriteToRegistry(const Settings& s, const wchar_t* device) noexcep
     LONG err;
     if (device && *device)
         // Users / the audio engine may create subkeys under Devices (install scripts set the ACL).
-        err = RegCreateKeyExW(HKEY_LOCAL_MACHINE, DevicePath(device).c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
+        err = CreateDeviceKey(device, &key);
     else
         err = RegOpenKeyExW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, 0, KEY_SET_VALUE, &key);
     if (err != ERROR_SUCCESS)
@@ -254,7 +303,7 @@ LONG Settings::SetDeviceCustom(const wchar_t* device, bool custom, const wchar_t
             return e;
     }
     HKEY key = nullptr;
-    LONG err = RegCreateKeyExW(HKEY_LOCAL_MACHINE, DevicePath(device).c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
+    LONG err = CreateDeviceKey(device, &key);
     if (err != ERROR_SUCCESS)
         return err;
     const DWORD v = custom ? 1u : 0u;
@@ -306,7 +355,18 @@ namespace settings
     {
         bool expected = false;
         if (!g_watcherStarted.compare_exchange_strong(expected, true))
+        {
+            // Running, but the key was deleted earlier: watch the new one and re-read everything.
+            if (g_keyLost.load())
+            {
+                AcquireSRWLockExclusive(&g_changeLock);
+                const bool ok = g_keyLost.load() && Reopen();
+                ReleaseSRWLockExclusive(&g_changeLock);
+                if (ok && g_event)
+                    SetEvent(g_event);  // OnChanged re-reads and logs "resumed"
+            }
             return;
+        }
         Publish(Settings::ReadFromRegistry(nullptr));
         // The key may not exist yet (defaults apply); then we only have the initial snapshot.
         if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kRegistryPath, 0, KEY_NOTIFY | KEY_QUERY_VALUE, &g_key) != ERROR_SUCCESS)

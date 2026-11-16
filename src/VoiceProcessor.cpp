@@ -80,9 +80,22 @@ namespace
 void VoiceProcessor::Register()
 {
     AcquireSRWLockExclusive(&g_registryLock);
-    if (!g_registry) g_registry = new std::vector<VoiceProcessor*>();
-    g_registry->push_back(this);
-    m_registered = true;
+    try
+    {
+        if (!g_registry) g_registry = new std::vector<VoiceProcessor*>();
+        g_registry->push_back(this);
+        m_registered = true;
+        // A settings change that landed between the caller's snapshot and now was applied to the other
+        // processors only: catch up (a no-op when nothing changed). Only with the live watcher running:
+        // otherwise nothing can change, and the caller's settings (e.g. a test's) are the truth.
+        if (settings::WatcherStarted())
+            RequestStageParams(settings::Current(m_settingsIndex));
+    }
+    catch (...)  // out of memory: never leave the lock held (every other stream would hang on it)
+    {
+        ReleaseSRWLockExclusive(&g_registryLock);
+        throw;
+    }
     ReleaseSRWLockExclusive(&g_registryLock);
 }
 
@@ -462,6 +475,7 @@ void VoiceProcessor::Reset() noexcept
     m_pos = 0;
     m_nextLevel = -1;
     m_underruns = 0;
+    m_nonFiniteBlocks = 0;
     if (m_rs) m_rs->Reset();
     // Start directly in the requested state (no fade-in from silence).
     m_gain.current = m_gain.target = InputGain(m_gainTargetDb, m_settings.agcEnabled != 0);
@@ -524,8 +538,9 @@ void VoiceProcessor::ProcessBlock() noexcept
         // Sanitize, apply the input gain (also in bypass: it is the volume control), delay, downmix.
         for (int i = 0; i < kBlock; ++i)
         {
+            // Clamped too: a finite but absurd sample (driver bug) would overflow the energy sums downstream.
             const float x = c.in[i];
-            c.in[i] = (std::isfinite(x) ? x : 0.0f) * m_gain.At(i);
+            c.in[i] = std::clamp((std::isfinite(x) ? x : 0.0f) * m_gain.At(i), -8.0f, 8.0f);
         }
         c.mic.Run(c.in.data(), delayFrom, delayTo);   // before everything, so bypass stays aligned
         for (int i = 0; i < kBlock; ++i)
@@ -622,6 +637,20 @@ void VoiceProcessor::ProcessBlock() noexcept
     m_limiterDb.store(m_limiter->LastReductionDb(), std::memory_order_relaxed);
     for (int i = 0; i < kBlock; ++i)
         m_voice[i] += m_limMix.At(i) * (m_tmp[i] - m_voice[i]);
+
+    // Watchdog: the inputs are sanitised, so this should never fire; if a stage ever produces NaN/Inf
+    // anyway, the apps get silence for this block instead of garbage, our own filters start clean,
+    // and the count shows up in the log at stream stop.
+    float check = 0.0f;
+    for (int i = 0; i < kBlock; ++i)
+        check += m_voice[i] * 0.0f;   // stays 0 unless some sample is NaN or Inf
+    if (check != 0.0f || !std::isfinite(check))
+    {
+        m_voice.fill(0.0f);
+        m_hpf.z1 = m_hpf.z2 = 0;
+        m_lpf.z1 = m_lpf.z2 = 0;
+        m_nonFiniteBlocks.fetch_add(1, std::memory_order_relaxed);
+    }
 
     // Mono voice to every channel; master bypass crossfades to the delayed original channels.
     const int64_t blockStart = static_cast<int64_t>(m_blockIndex) * kBlock;

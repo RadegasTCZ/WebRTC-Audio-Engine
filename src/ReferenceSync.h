@@ -73,7 +73,7 @@ private:
     double m_fillEma = 0.0;
     std::atomic<int64_t> m_ratePpb{0};   // rate correction (from the echo slide), parts per billion
     double m_ratioPpm = 0.0;
-    uint64_t m_resyncs = 0, m_dry = 0;
+    std::atomic<uint64_t> m_resyncs{0}, m_dry{0};  // RT writes, the timer thread reads
     int m_dryRun = 0;          // consecutive blocks without reference while running
     size_t m_lastStampW = 0;   // to learn the reference write size (chunk)
     int m_maxChunk = 0;

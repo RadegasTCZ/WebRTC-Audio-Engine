@@ -4,6 +4,7 @@
 #include <sddl.h>
 #include <strsafe.h>
 #include <algorithm>
+#include <functional>
 #include <cstdarg>
 #include <string>
 #include <vector>
@@ -21,6 +22,7 @@ namespace
     constexpr wchar_t kFolderName[] = L"WebrtcAudioEngine";
     constexpr LONGLONG kSegmentBytes = 1024 * 1024;
     constexpr size_t kKeepSegments = 10;
+    constexpr size_t kKeepDumps = 3;  // diagnostic recordings (aecdump-*.wav, up to 46 MB each)
     constexpr ULONGLONG kKeepAge = 14ull * 24 * 3600 * 10'000'000;  // 14 days in 100 ns units
     // Folder ACL when we create it: SYSTEM, Administrators, LOCAL SERVICE (audiodg) and the folder's owner
     // (the account that created it). Protected: nothing is inherited from the temp folder above.
@@ -128,6 +130,31 @@ namespace
         }
     }
 
+    // Keeps the newest kKeepDumps diagnostic recordings (names hold the time, so name order is age order).
+    void CleanupDumps() noexcept
+    {
+        try
+        {
+            std::vector<std::wstring> names;
+            WIN32_FIND_DATAW fd{};
+            HANDLE f = FindFirstFileExW((std::wstring(g_dir) + L"\\aecdump-*.wav").c_str(), FindExInfoBasic, &fd,
+                                        FindExSearchNameMatch, nullptr, 0);
+            if (f == INVALID_HANDLE_VALUE)
+                return;
+            do
+                if (!(fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))
+                    names.push_back(fd.cFileName);
+            while (FindNextFileW(f, &fd));
+            FindClose(f);
+            std::sort(names.begin(), names.end(), std::greater<>());
+            for (size_t i = kKeepDumps; i < names.size(); ++i)
+                DeleteFileW((std::wstring(g_dir) + L"\\" + names[i]).c_str());
+        }
+        catch (...)
+        {
+        }
+    }
+
     void StartSegment(const SYSTEMTIME& t, DWORD date) noexcept
     {
         g_file[0] = L'\0';
@@ -213,7 +240,8 @@ namespace apolog
         ReleaseSRWLockExclusive(&g_lock);
     }
 
-    bool WriteDiagFile(const wchar_t* name, const void* data, size_t bytes, wchar_t (&pathOut)[MAX_PATH]) noexcept
+    bool WriteDiagFile(const wchar_t* name, const void* head, size_t headBytes, const void* data, size_t bytes,
+                       wchar_t (&pathOut)[MAX_PATH]) noexcept
     {
         pathOut[0] = L'\0';
         if (!name || wcschr(name, L'\\') || wcschr(name, L'/'))
@@ -229,18 +257,25 @@ namespace apolog
                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
             if (h != INVALID_HANDLE_VALUE)
             {
-                const BYTE* p = static_cast<const BYTE*>(data);
-                ok = true;
-                while (ok && bytes > 0)
-                {
-                    const DWORD chunk = static_cast<DWORD>(std::min<size_t>(bytes, 1u << 24));
-                    DWORD written = 0;
-                    ok = WriteFile(h, p, chunk, &written, nullptr) && written == chunk;
-                    p += chunk;
-                    bytes -= chunk;
-                }
+                auto put = [h](const void* from, size_t n) {
+                    const BYTE* p = static_cast<const BYTE*>(from);
+                    bool good = true;
+                    while (good && n > 0)
+                    {
+                        const DWORD chunk = static_cast<DWORD>(std::min<size_t>(n, 1u << 24));
+                        DWORD written = 0;
+                        good = WriteFile(h, p, chunk, &written, nullptr) && written == chunk;
+                        p += chunk;
+                        n -= chunk;
+                    }
+                    return good;
+                };
+                ok = put(head, headBytes) && put(data, bytes);
                 CloseHandle(h);
+                if (!ok)
+                    DeleteFileW(pathOut);
             }
+            CleanupDumps();
         }
         ReleaseSRWLockExclusive(&g_lock);
         return ok;

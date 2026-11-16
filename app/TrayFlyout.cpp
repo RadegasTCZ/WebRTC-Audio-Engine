@@ -222,7 +222,7 @@ namespace
         case ROW_AEC:
             if (!g_live.aecRunning) { detail = L"No speaker reference for this recording"; return ui::Dot::Hold; }
             if (!(g_live.referenceDbfs >= -70.0f)) { detail = L"Waiting: nothing playing"; return ui::Dot::Hold; }
-            swprintf_s(buf, L"Removing echo \x00B7 %.0f dB", Sane(g_live.echoRemovedDb, 0.0f, 99.0f));
+            _snwprintf_s(buf, _TRUNCATE, L"Removing echo \x00B7 %.0f dB", Sane(g_live.echoRemovedDb, 0.0f, 99.0f));
             detail = buf;
             return ui::Dot::Lit;
         case ROW_NS:
@@ -234,11 +234,11 @@ namespace
             const float gain = Sane(g_live.agcGainDb, -99.0f, 99.0f);
             if (GetTickCount64() < g_alertUntil)
             {
-                swprintf_s(buf, L"Limiter catching peaks \x00B7 %+.0f dB", gain);
+                _snwprintf_s(buf, _TRUNCATE, L"Limiter catching peaks \x00B7 %+.0f dB", gain);
                 detail = buf;
                 return ui::Dot::Alert;
             }
-            swprintf_s(buf, g_speech ? L"Adjusting \x00B7 %+.0f dB" : L"Holding \x00B7 %+.0f dB", gain);
+            _snwprintf_s(buf, _TRUNCATE, g_speech ? L"Adjusting \x00B7 %+.0f dB" : L"Holding \x00B7 %+.0f dB", gain);
             detail = buf;
             return g_speech ? ui::Dot::Lit : ui::Dot::Hold;
         }

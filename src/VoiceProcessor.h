@@ -102,6 +102,7 @@ public:
     int SampleRate() const noexcept { return m_rate; }
     uint64_t Underruns() const noexcept { return m_underruns; }
     uint64_t ReferenceUnderruns() const noexcept { return m_refUnderruns; }
+    uint64_t NonFiniteBlocks() const noexcept { return m_nonFiniteBlocks.load(std::memory_order_relaxed); }
     bool HasAec() const noexcept { return m_hasAec.load(std::memory_order_relaxed); }
     float AgcGainDb() const noexcept { return m_agcGainDb.load(std::memory_order_relaxed); }
     float LimiterReductionDb() const noexcept { return m_limiterDb.load(std::memory_order_relaxed); }
@@ -228,7 +229,7 @@ private:
     void Register();
     void Unregister();
 
-    bool m_active = false;
+    std::atomic<bool> m_active{false};           // read by the timer thread too
     bool m_registered = false;
     int m_settingsIndex = -1;
     int m_channels = 0;
@@ -250,7 +251,7 @@ private:
     uint32_t m_aecStrengthRequested = 1;
     uint32_t m_aecRoomRequested = 0;
     ReferenceRing* m_refRing = nullptr;
-    uint64_t m_refUnderruns = 0;
+    std::atomic<uint64_t> m_refUnderruns{0};     // RT writes, other threads read (logs)
 
     std::unique_ptr<AgcStage> m_agc;
     Handoff<AgcStage> m_agcHandoff;
@@ -298,5 +299,6 @@ private:
     EchoDriftEstimator m_drift;
     int m_driftTicks = 0;
     uint64_t m_driftGuard = 0;   // resyncs + dry blocks at the last tick (a change = a jump: start over)
-    uint64_t m_underruns = 0;
+    std::atomic<uint64_t> m_underruns{0};        // RT writes, other threads read (logs)
+    std::atomic<uint64_t> m_nonFiniteBlocks{0};   // blocks silenced by the output watchdog (should stay 0)
 };

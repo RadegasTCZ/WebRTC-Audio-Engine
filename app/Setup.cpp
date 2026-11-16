@@ -151,7 +151,7 @@ namespace
         wchar_t line[1024];
         SYSTEMTIME t;
         GetLocalTime(&t);
-        int n = swprintf_s(line, L"%04u-%02u-%02u %02u:%02u:%02u  ", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+        int n = _snwprintf_s(line, _TRUNCATE, L"%04u-%02u-%02u %02u:%02u:%02u  ", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
         va_list a;
         va_start(a, fmt);
         const int m = _vsnwprintf_s(line + n, ARRAYSIZE(line) - n - 2, _TRUNCATE, fmt, a);
@@ -314,7 +314,7 @@ namespace
                 HANDLE user = nullptr;
                 if (!WTSQueryUserToken(sessions[i].SessionId, &user)) continue;  // no user in this session
                 wchar_t who[32];
-                swprintf_s(who, L"in session %lu", sessions[i].SessionId);
+                _snwprintf_s(who, _TRUNCATE, L"in session %lu", sessions[i].SessionId);
                 Launch(user, exe, L"/tray", who);
                 CloseHandle(user);
             }

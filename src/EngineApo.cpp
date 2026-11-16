@@ -2,6 +2,7 @@
 #include "Guids.h"
 #include "Log.h"
 #include "Telemetry.h"
+#include <xmmintrin.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <endpointvolume.h>
 #include <audiomediatype.h>
@@ -71,6 +72,34 @@ namespace
     SRWLOCK g_rememberedLock = SRWLOCK_INIT;
     RememberedDelay g_remembered[32] = {};
 
+    // Developer switches (A/B tests, diagnostic recordings) live in their own key, NOT in the settings key
+    // that any user may write: only administrators can create or change this one (HKLM\SOFTWARE default ACL).
+    constexpr wchar_t kDiagKey[] = L"SOFTWARE\\WebrtcAudioEngine\\Diagnostics";
+
+    // Read once at load: a function-local static would take its init guard on the real-time thread.
+    const int64_t g_qpcFreq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f.QuadPart; }();
+
+    // Flush-to-zero + denormals-are-zero while our processing runs. Recursive filters and smoothers fed
+    // with digital silence (muted mic) decay into denormals, which cost 10-100x per operation; upstream
+    // WebRTC's APM wraps its processing the same way (DenormalDisabler). The thread is shared with other
+    // APOs, so the previous mode is restored on the way out.
+    class DenormalGuard
+    {
+    public:
+        DenormalGuard() noexcept : m_old(_mm_getcsr()) { _mm_setcsr(m_old | 0x8040u); }  // FTZ | DAZ
+        ~DenormalGuard() { _mm_setcsr(m_old); }
+        DenormalGuard(const DenormalGuard&) = delete;
+        DenormalGuard& operator=(const DenormalGuard&) = delete;
+    private:
+        unsigned int m_old;
+    };
+
+    DWORD ReadDiagValue(const wchar_t* name, DWORD fallback) noexcept
+    {
+        DWORD v = 0, size = sizeof(v);
+        return RegGetValueW(HKEY_LOCAL_MACHINE, kDiagKey, name, RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS ? v : fallback;
+    }
+
     // Remembered per microphone: the mic delay (48 kHz samples, value "{guid}") and the reference rate
     // correction (0.1 ppm units as a signed DWORD, value "{guid}.rate").
     int LoadRememberedDelay(const wchar_t* device, double& ratePpm) noexcept
@@ -84,7 +113,7 @@ namespace
         ReleaseSRWLockShared(&g_rememberedLock);
         if (found >= 0) return found;
         wchar_t rateName[80];
-        swprintf_s(rateName, L"%s.rate", device);
+        _snwprintf_s(rateName, _TRUNCATE, L"%s.rate", device);
         DWORD v = 0, size = sizeof(v);
         if (RegGetValueW(HKEY_CURRENT_USER, kTimingKey, rateName, RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS)
             ratePpm = std::clamp(static_cast<int32_t>(v) / 10.0, -1000.0, 1000.0);
@@ -117,7 +146,7 @@ namespace
             const DWORD v = static_cast<DWORD>(samples);
             RegSetValueExW(key, device, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v));
             wchar_t rateName[80];
-            swprintf_s(rateName, L"%s.rate", device);
+            _snwprintf_s(rateName, _TRUNCATE, L"%s.rate", device);
             const DWORD r = static_cast<DWORD>(static_cast<int32_t>(std::lround(ratePpm * 10.0)));
             RegSetValueExW(key, rateName, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&r), sizeof(r));
             RegCloseKey(key);
@@ -263,10 +292,11 @@ STDMETHODIMP CEngineApo::Initialize(UINT32 cbDataSize, BYTE* pbyData)
             if (SUCCEEDED(dev->GetId(&id)) && id)
             {
                 wcsncpy_s(endpointId, id, _TRUNCATE);
-                std::wstring lower(id);
-                for (auto& ch : lower) ch = static_cast<wchar_t>(towlower(ch));
-                m_hardwareVolumeBus = lower.find(L"usb#") != std::wstring::npos || lower.find(L"usb\\") != std::wstring::npos ||
-                                      lower.find(L"bth") != std::wstring::npos || lower.find(L"bluetooth") != std::wstring::npos;
+                wchar_t lower[512];  // no allocation here: an exception must not escape into audiodg
+                wcsncpy_s(lower, id, _TRUNCATE);
+                for (wchar_t* ch = lower; *ch; ++ch) *ch = static_cast<wchar_t>(towlower(*ch));
+                m_hardwareVolumeBus = wcsstr(lower, L"usb#") || wcsstr(lower, L"usb\\") || wcsstr(lower, L"bth") ||
+                                      wcsstr(lower, L"bluetooth");
                 CoTaskMemFree(id);
             }
             dev->Release();
@@ -342,7 +372,7 @@ namespace
         else if (FAILED(t->GetUncompressedAudioFormat(&f)))
             wcscpy_s(out, L"(compressed/unknown)");
         else
-            swprintf_s(out, L"%s %uch %ub/%ub %.0fHz",
+            _snwprintf_s(out, _TRUNCATE, L"%s %uch %ub/%ub %.0fHz",
                        IsEqualGUID(f.guidFormatType, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ? L"float" : L"pcm",
                        f.dwSamplesPerFrame, f.dwValidBitsPerSample, f.dwBytesPerSampleContainer * 8, f.fFramesPerSecond);
     }
@@ -456,11 +486,8 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
                                               u32NumOutputConnections ? ppOutputConnections[0]->u32MaxFrameCount : 0u);
             // Echo reference attached by AddAuxiliaryInput (its ring was allocated in Initialize).
             m_proc.SetReference(m_refActive.load() ? &m_ref : nullptr);
-            // Automatic echo timing: on unless HKLM\SOFTWARE\WebrtcVoiceApo\AutoMicDelay = 0 (for A/B tests).
-            DWORD autoTiming = 1, atSize = sizeof(autoTiming);
-            if (RegGetValueW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, L"AutoMicDelay", RRF_RT_REG_DWORD, nullptr, &autoTiming,
-                             &atSize) != ERROR_SUCCESS)
-                autoTiming = 1;
+            // Automatic echo timing: on unless HKLM\SOFTWARE\WebrtcAudioEngine\Diagnostics\AutoMicDelay = 0 (A/B tests).
+            const DWORD autoTiming = ReadDiagValue(L"AutoMicDelay", 1);
             double rememberedRate = 0.0;
             const int remembered = autoTiming ? LoadRememberedDelay(m_deviceGuid, rememberedRate) : 0;
             m_proc.SetEchoTimingSetup(autoTiming != 0, remembered, rememberedRate);
@@ -493,11 +520,11 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
                 apolog::Write(L"[%s #%ld] echo timing: automatic mic delay OFF (AutoMicDelay = 0)", SlotName(), m_instanceId);
             if (ok && m_proc.HasAec())
             {
-                // Diagnostics, off unless asked for: HKLM\SOFTWARE\WebrtcVoiceApo\DiagDumpSeconds = 1..120 records
-                // the last N seconds of what AEC3 receives; written next to the log when the stream stops.
-                DWORD secs = 0, size = sizeof(secs);
-                if (RegGetValueW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, L"DiagDumpSeconds", RRF_RT_REG_DWORD, nullptr, &secs,
-                                 &size) == ERROR_SUCCESS && secs > 0)
+                // Diagnostics, off unless an administrator asks for it: value DiagDumpSeconds = 1..120 in
+                // HKLM\SOFTWARE\WebrtcAudioEngine\Diagnostics records the last N seconds of what AEC3 receives (mic + speakers!),
+                // written next to the log when the stream stops; only the newest 3 recordings are kept.
+                const DWORD secs = ReadDiagValue(L"DiagDumpSeconds", 0);
+                if (secs > 0)
                 {
                     try
                     {
@@ -568,7 +595,7 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
             size_t used = 0;
             for (int i = start; i < std::min(m_delayCount, start + 30); ++i)
             {
-                const int n = swprintf_s(line + used, std::size(line) - used, L" %d", static_cast<int>(m_delaySteps[i]));
+                const int n = _snwprintf_s(line + used, std::size(line) - used, _TRUNCATE, L" %d", static_cast<int>(m_delaySteps[i]));
                 if (n > 0) used += static_cast<size_t>(n);
             }
             apolog::Write(L"[%s #%ld] AEC3 delay estimate ms per 10 s from %02d:%02d:%s", SlotName(), m_instanceId, start / 6,
@@ -587,7 +614,7 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
                 {
                     wchar_t v[24];
                     value(i, v);
-                    const int n = swprintf_s(line + used, std::size(line) - used, L" %s", v);
+                    const int n = _snwprintf_s(line + used, std::size(line) - used, _TRUNCATE, L" %s", v);
                     if (n > 0) used += static_cast<size_t>(n);
                 }
                 apolog::Write(L"[%s #%ld] %s per 10 s from %02d:%02d:%s", SlotName(), m_instanceId, title, start / 6, (start % 6) * 10, line);
@@ -596,12 +623,12 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
         apolog::Write(L"[%s #%ld] reference sync: holds a backlog of %.1f ms, rate correction now %+.1f ppm, %llu resync(s), "
                       L"%llu block(s) without reference", SlotName(), m_instanceId, m_lastTarget / 48.0, m_proc.Sync().RatioPpm(),
                       m_proc.Sync().Resyncs(), m_proc.ReferenceUnderruns());
-        timeline(L"reference backlog ms", [&](int i, wchar_t (&v)[24]) { swprintf_s(v, L"%.1f", m_queueAvgSteps[i] / 48.0); });
-        timeline(L"reference sync ppm", [&](int i, wchar_t (&v)[24]) { swprintf_s(v, L"%+.1f", m_queueMinSteps[i] / 10.0); });
+        timeline(L"reference backlog ms", [&](int i, wchar_t (&v)[24]) { _snwprintf_s(v, _TRUNCATE, L"%.1f", m_queueAvgSteps[i] / 48.0); });
+        timeline(L"reference sync ppm", [&](int i, wchar_t (&v)[24]) { _snwprintf_s(v, _TRUNCATE, L"%+.1f", m_queueMinSteps[i] / 10.0); });
         timeline(L"reference resyncs/blocks without reference", [&](int i, wchar_t (&v)[24]) {
-            swprintf_s(v, L"%d/%d", m_queueTrimSteps[i], m_queueUnderSteps[i]); });
+            _snwprintf_s(v, _TRUNCATE, L"%d/%d", m_queueTrimSteps[i], m_queueUnderSteps[i]); });
         timeline(L"echo vs reference ms (raw, auto timing)", [&](int i, wchar_t (&v)[24]) {
-            if (m_offsetSteps[i] == INT16_MIN) wcscpy_s(v, L"."); else swprintf_s(v, L"%+.1f", m_offsetSteps[i] / 10.0); });
+            if (m_offsetSteps[i] == INT16_MIN) wcscpy_s(v, L"."); else _snwprintf_s(v, _TRUNCATE, L"%+.1f", m_offsetSteps[i] / 10.0); });
     }
     if (m_dumpArmed)
     {
@@ -612,20 +639,20 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
             if (!pairs.empty())
             {
                 // WAV, float32, 48 kHz, 2 channels: left = microphone (what AEC3 gets), right = echo reference.
+                // Header and samples are written separately (no second copy of up to 46 MB inside audiodg).
                 const uint32_t dataBytes = static_cast<uint32_t>(pairs.size() * sizeof(float));
-                std::vector<uint8_t> wav(44 + dataBytes);
+                uint8_t wav[44];
                 auto put32 = [&](size_t at, uint32_t v) { std::memcpy(&wav[at], &v, 4); };
                 auto put16 = [&](size_t at, uint16_t v) { std::memcpy(&wav[at], &v, 2); };
                 std::memcpy(&wav[0], "RIFF", 4); put32(4, 36 + dataBytes); std::memcpy(&wav[8], "WAVEfmt ", 8);
                 put32(16, 16); put16(20, 3 /*IEEE float*/); put16(22, 2); put32(24, 48000); put32(28, 48000 * 8);
                 put16(32, 8); put16(34, 32); std::memcpy(&wav[36], "data", 4); put32(40, dataBytes);
-                std::memcpy(&wav[44], pairs.data(), dataBytes);
                 SYSTEMTIME t;
                 GetLocalTime(&t);
                 wchar_t name[96], path[MAX_PATH];
-                swprintf_s(name, L"aecdump-%04u%02u%02u_%02u%02u%02u-%ld.wav", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
+                _snwprintf_s(name, _TRUNCATE, L"aecdump-%04u%02u%02u_%02u%02u%02u-%ld.wav", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute,
                            t.wSecond, m_instanceId);
-                if (apolog::WriteDiagFile(name, wav.data(), wav.size(), path))
+                if (apolog::WriteDiagFile(name, wav, sizeof(wav), pairs.data(), dataBytes, path))
                     apolog::Write(L"[%s #%ld] diagnostics: wrote %.1f s of AEC3 input (L = mic, R = reference) to %s", SlotName(),
                                   m_instanceId, pairs.size() / 2 / 48000.0, path);
                 else
@@ -638,6 +665,8 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
     apolog::Write(L"[%s #%ld] UnlockForProcess mode=%s after %.1f s: calls=%llu validFrames=%llu silentCalls=%llu period=%u..%u frames peak=%.1f dBFS underruns=%llu",
                   SlotName(), m_instanceId, ModeName(m_mode), seconds, m_processCalls, m_validFrames, m_silentCalls,
                   m_maxPeriod ? m_minPeriod : 0, m_maxPeriod, peakDb, m_proc.Underruns());
+    if (const uint64_t bad = m_proc.NonFiniteBlocks())
+        apolog::Write(L"[%s #%ld] WARNING: %llu block(s) had NaN/Inf after processing and were silenced", SlotName(), m_instanceId, bad);
     return CBaseAudioProcessingObject::UnlockForProcess();
 }
 
@@ -725,6 +754,7 @@ STDMETHODIMP_(void) CEngineApo::APOProcess(UINT32 u32NumInputConnections, APO_CO
 {
     if (u32NumInputConnections == 0 || u32NumOutputConnections == 0)
         return;
+    const DenormalGuard denormals;
 
     APO_CONNECTION_PROPERTY* in = ppInputConnections[0];
     APO_CONNECTION_PROPERTY* out = ppOutputConnections[0];
@@ -740,10 +770,9 @@ STDMETHODIMP_(void) CEngineApo::APOProcess(UINT32 u32NumInputConnections, APO_CO
         float* o = reinterpret_cast<float*>(out->pBuffer);
         const Settings cur = settings::Current(m_devIdx);
         const float gainDb = SliderGainDb(cur);
-        static const int64_t qpcFreq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f.QuadPart; }();
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
-        m_proc.SetClock(now.QuadPart, qpcFreq);
+        m_proc.SetClock(now.QuadPart, g_qpcFreq);
         if (in->u32BufferFlags == BUFFER_VALID)
             m_proc.Process(reinterpret_cast<const float*>(in->pBuffer), o, static_cast<int>(frames), cur, gainDb);
         else
@@ -975,7 +1004,9 @@ STDMETHODIMP_(void) CEngineApo::AcceptInput(DWORD dwInputId, const APO_CONNECTIO
             if (!silent)
                 for (UINT32 c = 0; c < m_refChannels; ++c)
                     acc += src[(static_cast<size_t>(done) + i) * m_refChannels + c];
-            mono[i] = acc * inv;
+            // Any app can play NaN/Inf or absurd values; one of them would poison AEC3's state for good.
+            acc *= inv;
+            mono[i] = std::isfinite(acc) ? std::clamp(acc, -4.0f, 4.0f) : 0.0f;
         }
         const size_t written = m_ref.Write(mono, n, ticks);
         m_refDropped.fetch_add(n - written, std::memory_order_relaxed);

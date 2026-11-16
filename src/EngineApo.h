@@ -150,7 +150,7 @@ private:
     int m_timingMeasured = 0, m_timingValid = 0, m_timingOutOfRange = 0, m_timingChanges = 0;
     bool m_timingAgreedLogged = false;
     EchoTimingResult m_timingLast{};
-    int m_latencyLogged = 0;            // GetLatency calls logged this stream
+    std::atomic<int> m_latencyLogged{0};  // GetLatency calls logged this stream (any thread)
     HNSTIME m_latencyLastLogged = -1;
 
     ::telemetry::Slot* m_telemetry = nullptr;  // this device's shared-memory meters for the tray app

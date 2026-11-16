@@ -2,7 +2,7 @@
 // Cross-correlates L (mic) and R (reference) of an aecdump WAV (float32, 48 kHz, stereo).
 // Positive lag = the echo in the mic comes AFTER the reference (normal, AEC3 can model it).
 // Negative lag = the echo arrives BEFORE the reference (AEC3 cannot model it).
-// Recordings come from the effect: set HKLM\SOFTWARE\WebrtcVoiceApo\DiagDumpSeconds = N (1..120), start a
+// Recordings come from the effect: set HKLM\SOFTWARE\WebrtcAudioEngine\Diagnostics\DiagDumpSeconds (admin only) = N (1..120), start a
 // stream, play speech on the speakers, stop the stream -> aecdump-*.wav next to the engine log.
 // Usage: AecDumpXcorr.exe <aecdump.wav>
 // Coarse search at 8 kHz over +-600 ms in 10 s windows, then refined at 48 kHz.
