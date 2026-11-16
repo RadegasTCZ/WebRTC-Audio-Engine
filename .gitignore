@@ -28,3 +28,25 @@ CMakeFiles/
 *.cer
 *.pfx
 *.p12
+*.key
+*.pem
+*.pvk
+*.spc
+*.p7b
+
+# Installer output and archives
+*.msi
+*.wixpdb
+*.cab
+*.zip
+
+# Diagnostics: recordings hold microphone/speaker audio; dumps and traces may hold anything
+*.wav
+*.dmp
+*.etl
+*.map
+
+# Workspace folders that belong next to the clone, never inside it
+/upstream/
+/logs/
+/backups/

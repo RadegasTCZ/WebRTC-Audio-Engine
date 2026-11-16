@@ -1,0 +1,12 @@
+# One line ending everywhere: LF, in the repository and in the working copy, on every machine.
+# MSVC, CMake, PowerShell, WiX and pnputil (INF files) all read LF fine.
+* text=auto eol=lf
+
+# Never touch binary files.
+*.ico binary
+*.png binary
+*.jpg binary
+*.wav binary
+*.msi binary
+*.cat binary
+*.cer binary
