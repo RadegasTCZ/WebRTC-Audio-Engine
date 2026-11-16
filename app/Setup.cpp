@@ -49,9 +49,16 @@ namespace
         CoTaskMemFree(p);
         return s;
     }
-    std::wstring InstallDir() { return Known(FOLDERID_ProgramFiles) + L"\\" + kDirName; }
-    std::wstring InstalledExe() { return InstallDir() + L"\\" + app::kExeName; }
-    std::wstring ShortcutPath() { return Known(FOLDERID_CommonPrograms) + L"\\" + kShortcut; }
+    // Empty if Windows cannot tell us the folder: never fall back to a root-relative path like
+    // "\WebrtcAudioEngine" (that would be C:\WebrtcAudioEngine, which any user can create).
+    std::wstring Under(REFKNOWNFOLDERID id, const wchar_t* name)
+    {
+        const std::wstring base = Known(id);
+        return base.empty() ? std::wstring() : base + L"\\" + name;
+    }
+    std::wstring InstallDir() { return Under(FOLDERID_ProgramFiles, kDirName); }
+    std::wstring InstalledExe() { const std::wstring d = InstallDir(); return d.empty() ? d : d + L"\\" + app::kExeName; }
+    std::wstring ShortcutPath() { return Under(FOLDERID_CommonPrograms, kShortcut); }
     std::wstring SelfPath()
     {
         wchar_t p[MAX_PATH * 2];
@@ -104,7 +111,9 @@ namespace
     const std::wstring& LogDir()
     {
         static std::wstring dir = [] {
-            const std::wstring d = Known(FOLDERID_ProgramData) + L"\\" + kDirName;
+            const std::wstring d = Under(FOLDERID_ProgramData, kDirName);
+            if (d.empty())
+                return std::wstring();
             PSECURITY_DESCRIPTOR sd = nullptr;
             // Protected DACL: SYSTEM and Administrators full control, Users read.
             if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)",
@@ -121,12 +130,9 @@ namespace
                     OwnedByAdmins(d))
                 {
                     // Re-apply the ACL (an older build left the inherited ProgramData one: Users could add files).
-                    BOOL present = FALSE, defaulted = FALSE;
-                    PACL dacl = nullptr;
-                    GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted);
-                    if (SetNamedSecurityInfoW(const_cast<LPWSTR>(d.c_str()), SE_FILE_OBJECT,
-                                              DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, nullptr, nullptr, dacl,
-                                              nullptr) == ERROR_SUCCESS)
+                    // SetFileSecurityW: this folder only, never propagated into what is inside (we run as
+                    // SYSTEM, and a user may have placed links in there).
+                    if (SetFileSecurityW(d.c_str(), DACL_SECURITY_INFORMATION, sd))
                     {
                         // A log a user planted earlier is not ours: start a new one.
                         const std::wstring log = d + L"\\setup.log";
@@ -206,8 +212,30 @@ namespace
             LocalFree(newDacl);
             LocalFree(sd);
         }
+        // Devices: its own protected ACL. Inherited, HKLM\SOFTWARE's CREATOR OWNER entry would give whoever creates
+        // a microphone subkey full control of it (including turning it into a registry link that the audio
+        // engine or an elevated app would then write through). Users etc. get the same rights as above, on
+        // every subkey; only SYSTEM and Administrators get more. Opened as a link, never through one.
         HKEY dev = nullptr;
-        if (RegCreateKeyExW(k, L"Devices", 0, nullptr, 0, KEY_READ, nullptr, &dev, nullptr) == ERROR_SUCCESS) RegCloseKey(dev);
+        if (RegCreateKeyExW(k, L"Devices", 0, nullptr, REG_OPTION_OPEN_LINK, KEY_QUERY_VALUE | WRITE_DAC, nullptr, &dev, nullptr) ==
+            ERROR_SUCCESS)
+        {
+            DWORD type = 0;
+            PSECURITY_DESCRIPTOR devSd = nullptr;
+            if (RegQueryValueExW(dev, L"SymbolicLinkValue", nullptr, &type, nullptr, nullptr) == ERROR_SUCCESS && type == REG_LINK)
+                Log(L"warning: the Devices settings key is a registry link: left alone");
+            else if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                         L"D:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;0x2001f;;;BU)(A;OICI;0x2001f;;;LS)"
+                         L"(A;OICI;0x2001f;;;AC)(A;OICI;0x2001f;;;S-1-15-2-2)",
+                         SDDL_REVISION_1, &devSd, nullptr))
+            {
+                // RegSetKeySecurity: this key only, nothing propagated into (possibly user-made) subkeys.
+                if (const LONG e = RegSetKeySecurity(dev, DACL_SECURITY_INFORMATION, devSd); e != ERROR_SUCCESS)
+                    Log(L"warning: Devices key ACL not set (error %ld)", e);
+                LocalFree(devSd);
+            }
+            RegCloseKey(dev);
+        }
         RegCloseKey(k);
         return r;
     }
@@ -395,6 +423,13 @@ namespace
             }
             err = GetLastError();
         }
+        // No parking place (e.g. someone created the ProgramData folder before us, so it is not trusted):
+        // the file stays where it is until the next restart, then Windows deletes it.
+        if (MoveFileExW(path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT))
+        {
+            Log(L"%s is in use: it will be deleted at the next restart", path.c_str());
+            return true;
+        }
         Log(L"could not remove %s (error %lu)", path.c_str(), err);
         SetLastError(err);
         return false;
@@ -433,6 +468,11 @@ namespace setup
         CleanParked();
         CloseRunningApps();
         const std::wstring dir = InstallDir(), exe = InstalledExe(), self = SelfPath();
+        if (dir.empty())
+        {
+            Log(L"failed: Windows did not tell us where Program Files is");
+            return ERROR_PATH_NOT_FOUND;
+        }
         CreateDirectoryW(dir.c_str(), nullptr);
         if (_wcsicmp(self.c_str(), exe.c_str()) != 0)
         {
@@ -453,7 +493,7 @@ namespace setup
 
         IShellLinkW* link = nullptr;
         bool shortcut = false;
-        if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))))
+        if (!ShortcutPath().empty() && SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))))
         {
             link->SetPath(exe.c_str());
             link->SetDescription(L"Echo cancellation, noise suppression, automatic gain and cleanup for your microphone");
@@ -512,11 +552,16 @@ namespace setup
             RegCloseKey(k);
         }
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, kUninstallKey);
-        DeleteFileW(ShortcutPath().c_str());
+        if (const std::wstring shortcut = ShortcutPath(); !shortcut.empty()) DeleteFileW(shortcut.c_str());
 
         // We (and the Apps & features process waiting for us) may be running from this exe: RemoveFile moves it
         // out of the way and deletes it at the next restart.
         const std::wstring exe = InstalledExe();
+        if (exe.empty())
+        {
+            Log(L"failed: Windows did not tell us where Program Files is");
+            return ERROR_PATH_NOT_FOUND;
+        }
         if (!RemoveFile(exe))
         {
             const DWORD err = GetLastError();

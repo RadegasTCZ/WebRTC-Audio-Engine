@@ -25,6 +25,7 @@
 
 #include <cstdarg>
 #include <cwchar>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -185,20 +186,44 @@ namespace
         if (!scm) return;
         std::vector<std::wstring> names = {L"AudioEndpointBuilder", L"Audiosrv"};
         names.insert(names.end(), dependents.rbegin(), dependents.rend());  // reverse of the stop order
+        bool allRunning = true;
         for (const auto& name : names)
         {
             if (SC_HANDLE svc = OpenServiceW(scm, name.c_str(), SERVICE_START | SERVICE_QUERY_STATUS))
             {
                 if (!StartServiceW(svc, 0, nullptr) && GetLastError() != ERROR_SERVICE_ALREADY_RUNNING)
+                {
                     Log(L"could not start %s (error %lu)", name.c_str(), GetLastError());
-                else
-                    WaitState(svc, SERVICE_RUNNING);
+                    allRunning = false;
+                }
+                else if (!WaitState(svc, SERVICE_RUNNING))
+                {
+                    Log(L"%s did not report running within 30 s", name.c_str());
+                    allRunning = false;
+                }
                 CloseServiceHandle(svc);
             }
         }
         CloseServiceHandle(scm);
-        Log(L"Windows Audio started");
+        Log(allRunning ? L"Windows Audio started" : L"Windows Audio restart incomplete (see above)");
     }
+
+    // Windows Audio stopped for the lifetime of this object, started again however the scope is left
+    // (also by an exception): a failed install must never leave the PC without sound.
+    class AudioPause
+    {
+    public:
+        AudioPause() : m_dependents(StopAudio()) {}
+        ~AudioPause()
+        {
+            try { StartAudio(m_dependents); }
+            catch (...) { Log(L"could not restart Windows Audio (out of memory)"); }
+        }
+        AudioPause(const AudioPause&) = delete;
+        AudioPause& operator=(const AudioPause&) = delete;
+    private:
+        std::vector<std::wstring> m_dependents;
+    };
 
     // ------------------------------------------------------------------ certificate trust
 
@@ -377,6 +402,42 @@ namespace
 
     // ------------------------------------------------------------------ install / uninstall
 
+    bool SameFileContents(const std::wstring& a, const std::wstring& b)
+    {
+        auto read = [](const std::wstring& path, std::string& out) {
+            HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+            if (h == INVALID_HANDLE_VALUE) return false;
+            LARGE_INTEGER size{};
+            bool ok = GetFileSizeEx(h, &size) && size.QuadPart < (1 << 20);
+            if (ok)
+            {
+                out.resize(static_cast<size_t>(size.QuadPart));
+                DWORD got = 0;
+                ok = ReadFile(h, out.data(), static_cast<DWORD>(out.size()), &got, nullptr) && got == out.size();
+            }
+            CloseHandle(h);
+            return ok;
+        };
+        std::string x, y;
+        return read(a, x) && read(b, y) && x == y;
+    }
+
+    // True if every one of our INFs is already in the driver store byte for byte. Windows keeps the INF as
+    // INF\oemNN.inf, and each build stamps a new DriverVer, so equal bytes mean the same build.
+    bool AllAlreadyInStore(const std::wstring& driverDir, const std::vector<OemInf>& store)
+    {
+        const std::wstring infDir = WindowsDir() + L"\\INF\\";
+        for (size_t i = 0; i < std::size(kInfs); ++i)
+        {
+            const std::wstring staged = driverDir + kInfDirs[i] + L"\\" + kInfs[i];
+            bool found = false;
+            for (const auto& p : store)
+                found = found || (p.original == kInfs[i] && SameFileContents(staged, infDir + p.published));
+            if (!found) return false;
+        }
+        return true;
+    }
+
     UINT DoInstall()
     {
         const std::wstring driverDir = CustomActionData();
@@ -388,7 +449,14 @@ namespace
 
         const std::vector<OemInf> before = OurPackages();
         UINT result = ERROR_SUCCESS;
-        const std::vector<std::wstring> dependents = StopAudio();
+        {
+        // A repair of the same build (any user can start one) changes nothing in the driver store: then the
+        // audio engine keeps running instead of cutting everyone's sound.
+        std::optional<AudioPause> pause;
+        if (AllAlreadyInStore(driverDir, before))
+            Log(L"the same packages are already installed: Windows Audio keeps running");
+        else
+            pause.emplace();
         for (size_t i = 0; i < std::size(kInfs); ++i)
         {
             const std::wstring inf = driverDir + kInfDirs[i] + L"\\" + kInfs[i];
@@ -405,7 +473,7 @@ namespace
                 break;
             }
         }
-        StartAudio(dependents);
+        }  // Windows Audio starts again here (if it was stopped)
         if (result != ERROR_SUCCESS) return result;
 
         // Remove superseded versions (e.g. from an older script install). No force: a package still in use stays.
@@ -453,7 +521,13 @@ namespace
     void RemoveSettingsApp()
     {
         // Program Files copy, Start-menu shortcut, sign-in start, Device Setup Manager record: the app knows its parts.
-        const std::wstring exe = KnownFolder(FOLDERID_ProgramFiles) + L"\\WebrtcAudioEngine\\WebrtcAudioEngineSettings.exe";
+        const std::wstring programFiles = KnownFolder(FOLDERID_ProgramFiles);
+        if (programFiles.empty())  // never a root-relative path: C:\WebrtcAudioEngine is user-creatable
+        {
+            Log(L"settings app: Program Files folder unknown, not removed");
+            return;
+        }
+        const std::wstring exe = programFiles + L"\\WebrtcAudioEngine\\WebrtcAudioEngineSettings.exe";
         if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES)
         {
             Log(L"settings app not installed");
@@ -479,7 +553,8 @@ namespace
         const std::wstring driverDir = CustomActionData();
         const std::wstring infDir = WindowsDir() + L"\\INF\\";
         std::vector<OemInf> packages = OurPackages();
-        const std::vector<std::wstring> dependents = StopAudio();
+        {
+        const AudioPause pause;
         // Extension first (it stops re-creating the software devices), then the components.
         for (const wchar_t* inf : {kInfs[2], kInfs[0], kInfs[1]})
         {
@@ -495,7 +570,7 @@ namespace
             }
         }
         RemoveOurDevices();
-        StartAudio(dependents);
+        }  // Windows Audio starts again here
         RemoveSettingsApp();
         if (!driverDir.empty()) UntrustCertificate(driverDir);
         return ERROR_SUCCESS;  // best effort: never block removing the product

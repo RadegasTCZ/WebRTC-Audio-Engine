@@ -128,8 +128,23 @@ namespace
 
     // Copies every value of Devices\<from> to Devices\<to> (a new key), then forgets <from>: deleted if we
     // may, otherwise marked not custom (which hides it). Returns true if the settings arrived.
+    // A Devices subkey that is a registry link (only possible on keys made before the installer locked the
+    // ACL down): never read, write or delete through it - the app may be running elevated.
+    bool IsLink(HKEY devices, const std::wstring& name)
+    {
+        HKEY k = nullptr;
+        if (RegOpenKeyExW(devices, name.c_str(), REG_OPTION_OPEN_LINK, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS)
+            return false;
+        DWORD type = 0;
+        const bool link = RegQueryValueExW(k, L"SymbolicLinkValue", nullptr, &type, nullptr, nullptr) == ERROR_SUCCESS && type == REG_LINK;
+        RegCloseKey(k);
+        return link;
+    }
+
     bool MoveDeviceSettings(HKEY devices, const std::wstring& from, const std::wstring& to, const std::wstring& newName)
     {
+        if (IsLink(devices, from) || IsLink(devices, to))
+            return false;
         HKEY src = nullptr, dst = nullptr;
         if (RegOpenKeyExW(devices, from.c_str(), 0, KEY_QUERY_VALUE, &src) != ERROR_SUCCESS)
             return false;
@@ -157,8 +172,8 @@ namespace
         if (dst) RegCloseKey(dst);
         if (!ok)
             return false;
-        if (RegDeleteTreeW(devices, from.c_str()) == ERROR_SUCCESS)
-            RegDeleteKeyW(devices, from.c_str());
+        // Our keys have values only, no subkeys: a plain delete is enough and never descends anywhere.
+        if (RegDeleteKeyW(devices, from.c_str()) == ERROR_SUCCESS) {}
         else
         {
             const DWORD zero = 0;  // no delete right on a key someone else created: hide it instead

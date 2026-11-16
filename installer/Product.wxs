@@ -31,30 +31,39 @@
     </Property>
     <Launch Condition="Installed OR WINDOWSBUILD &gt;= 22000" Message="WebRTC Audio Engine needs Windows 11." />
 
+    <!-- The driver packages are built for x64 only (an ARM64 PC would install, fail and roll back). -->
+    <Property Id="CPUARCH">
+      <RegistrySearch Root="HKLM" Key="SYSTEM\CurrentControlSet\Control\Session Manager\Environment"
+                      Name="PROCESSOR_ARCHITECTURE" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR CPUARCH=&quot;AMD64&quot;" Message="WebRTC Audio Engine runs on x64 (Intel/AMD) Windows only." />
+
     <Icon Id="AppIcon" SourceFile="$(var.IconFile)" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
     <Property Id="ARPNOMODIFY" Value="1" />
     <Property Id="ARPCOMMENTS" Value="Echo cancellation, noise suppression, automatic gain and cleanup for your microphone" />
 
+    <!-- Private (mixed-case) directory ids: they cannot be redirected from the msiexec command line, so the
+         SYSTEM custom actions only ever read the .cer and packages from under Program Files. -->
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="WebrtcAudioEngine">
-        <Directory Id="DRIVERFOLDER" Name="Driver">
-          <Directory Id="COMPONENTDIR" Name="component" />
-          <Directory Id="APPDIR" Name="app" />
-          <Directory Id="EXTENSIONDIR" Name="extension" />
+      <Directory Id="InstallFolder" Name="WebrtcAudioEngine">
+        <Directory Id="DriverFolder" Name="Driver">
+          <Directory Id="ComponentDir" Name="component" />
+          <Directory Id="AppDir" Name="app" />
+          <Directory Id="ExtensionDir" Name="extension" />
         </Directory>
       </Directory>
     </StandardDirectory>
 
     <ComponentGroup Id="DriverPackages">
-      <Files Directory="COMPONENTDIR" Include="$(var.PackageDir)\component\**" />
-      <Files Directory="APPDIR" Include="$(var.PackageDir)\app\**" />
-      <Files Directory="EXTENSIONDIR" Include="$(var.PackageDir)\extension\**" />
-      <Component Directory="DRIVERFOLDER">
+      <Files Directory="ComponentDir" Include="$(var.PackageDir)\component\**" />
+      <Files Directory="AppDir" Include="$(var.PackageDir)\app\**" />
+      <Files Directory="ExtensionDir" Include="$(var.PackageDir)\extension\**" />
+      <Component Directory="DriverFolder">
         <File Source="$(var.CertFile)" Name="WebrtcAudioEngine.cer" />
       </Component>
       <!-- Tells the settings app not to add its own "Installed apps" entry (this one removes everything). -->
-      <Component Directory="INSTALLFOLDER">
+      <Component Directory="InstallFolder">
         <RegistryValue Root="HKLM" Key="SOFTWARE\WebrtcAudioEngineSetup" Name="ProductCode" Value="[ProductCode]"
                        Type="string" KeyPath="yes" />
       </Component>
@@ -79,10 +88,10 @@
                   Execute="deferred" Impersonate="no" Return="ignore" />
 
     <!-- CustomActionData of each deferred action: the Driver folder. -->
-    <SetProperty Id="RollbackInstallDrivers" Value="[DRIVERFOLDER]" After="CostFinalize" Sequence="execute" />
-    <SetProperty Id="InstallDrivers" Value="[DRIVERFOLDER]" After="CostFinalize" Sequence="execute" />
-    <SetProperty Id="RollbackUninstallDrivers" Value="[DRIVERFOLDER]" After="CostFinalize" Sequence="execute" />
-    <SetProperty Id="UninstallDrivers" Value="[DRIVERFOLDER]" After="CostFinalize" Sequence="execute" />
+    <SetProperty Id="RollbackInstallDrivers" Value="[DriverFolder]" After="CostFinalize" Sequence="execute" />
+    <SetProperty Id="InstallDrivers" Value="[DriverFolder]" After="CostFinalize" Sequence="execute" />
+    <SetProperty Id="RollbackUninstallDrivers" Value="[DriverFolder]" After="CostFinalize" Sequence="execute" />
+    <SetProperty Id="UninstallDrivers" Value="[DriverFolder]" After="CostFinalize" Sequence="execute" />
 
     <InstallExecuteSequence>
       <!-- Install / repair: after the files and the registry marker are in place. -->
