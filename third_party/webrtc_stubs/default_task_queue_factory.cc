@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
+// Written for this project; it only fills in declarations of WebRTC's own (BSD-3-Clause) API.
 // Stub: provides CreateDefaultTaskQueueFactory() without pulling in
 // platform-specific task queue implementations.
 // AEC3 never uses task_queue_factory at runtime, but the Environment

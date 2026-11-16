@@ -1,8 +1,11 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 <#
 .SYNOPSIS
   Polls a capture endpoint's FxProperties + Properties keys (and the audio driver's class key)
   and logs every value that changes, with timestamps. Used to discover which private
-  Realtek value a UI toggle writes. Read-only.
+  Realtek value a UI toggle writes. Read-only. A development tool: the driver-key part only
+  looks for a Realtek HD Audio codec (HDAUDIO\FUNC_01&VEN_10EC); other PCs get the endpoint keys only.
 #>
 param(
     # Endpoint GUID, e.g. '{6a6941e8-...}' (see HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture).

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 # Shared settings for the scripts. Dot-source this file.
 
 # The effect's log: segmented engine-<start time>.log files in audiodg's (LOCAL SERVICE) temp folder (src\Log.cpp).

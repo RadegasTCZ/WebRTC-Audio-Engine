@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // Offline smoke test: drives the APO like audiodg does, inside a normal process,
 // so crashes show up here instead of killing system audio.
 // Usage: ApoHarness.exe <path to WebrtcVoiceApo.dll>

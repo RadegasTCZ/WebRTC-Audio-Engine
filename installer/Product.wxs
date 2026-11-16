@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- Copyright (C) 2026 RadegasTCZ -->
 <!--
   WebRTC Audio Engine installer (WiX v7). Built by scripts\Build-Msi.ps1, which passes:
     ProductVersion  version of the staged driver packages (DriverVer)
@@ -5,6 +7,7 @@
     CertFile        the signing certificate (.cer) the custom action trusts on the target PC
     CaDll           SetupActions.dll (installer\SetupActions.cpp)
     IconFile        the app icon (Installed apps)
+    RepoDir         the repository root (LICENSE, THIRD-PARTY-NOTICES.txt)
 
   The MSI copies the signed driver packages to Program Files\WebrtcAudioEngine\Driver, then the custom
   action installs them (see SetupActions.cpp). Windows installs the settings app from the app package by
@@ -61,6 +64,13 @@
       <Files Directory="ExtensionDir" Include="$(var.PackageDir)\extension\**" />
       <Component Directory="DriverFolder">
         <File Source="$(var.CertFile)" Name="WebrtcAudioEngine.cer" />
+      </Component>
+      <!-- The licences travel with the binaries (GPLv3 and the third-party licences require it). -->
+      <Component Directory="InstallFolder">
+        <File Source="$(var.RepoDir)\LICENSE" Name="LICENSE.txt" />
+      </Component>
+      <Component Directory="InstallFolder">
+        <File Source="$(var.RepoDir)\THIRD-PARTY-NOTICES.txt" Name="THIRD-PARTY-NOTICES.txt" />
       </Component>
       <!-- Tells the settings app not to add its own "Installed apps" entry (this one removes everything). -->
       <Component Directory="InstallFolder">

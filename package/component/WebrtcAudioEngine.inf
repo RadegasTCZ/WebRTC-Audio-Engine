@@ -1,7 +1,10 @@
-; WebRTC Audio Engine: effect-pack component INF (test-signed experiment).
+; SPDX-License-Identifier: GPL-3.0-or-later
+; Copyright (C) 2026 RadegasTCZ
+; WebRTC Audio Engine: effect-pack component INF.
 ; Modelled on Windows' voiceclarityep_audio_component.inf (Voice Clarity effect pack).
 ; NOTE: the effect-pack schema below is undocumented; Microsoft's own INF names it
-; "EffectPack_Schema_Internal_V1". Whether Windows accepts a third-party pack is what we test.
+; "EffectPack_Schema_Internal_V1". Windows 11 accepts this third-party pack today, but because the
+; schema is internal, a future Windows update could change or drop it.
 
 [Version]
 Signature   = "$WINDOWS NT$"

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // ClockProbe: measures each audio device's real sample clock against QueryPerformanceCounter.
 // Opens every active capture endpoint (shared mode, data drained and discarded) and the default render
 // endpoint (plays digital silence, mixed in shared mode, inaudible), then samples IAudioClock::GetPosition

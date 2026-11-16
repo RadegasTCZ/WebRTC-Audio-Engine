@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 #pragma once
 #include <atomic>
 #include <cstdint>

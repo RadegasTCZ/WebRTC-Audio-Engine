@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
+// Written for this project; it only fills in declarations of WebRTC's own (BSD-3-Clause) API.
 // Stub: MatchedFilterCore_AVX2 delegates to SSE2 version.
 // The original matched_filter_avx2.cc uses __m256[index] which is a
 // GCC/Clang extension unsupported by MSVC. The SSE2 version works fine.

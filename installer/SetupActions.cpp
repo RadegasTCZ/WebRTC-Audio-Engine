@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // MSI custom actions for the WebRTC Audio Engine installer (installer/Product.wxs).
 //
 // The MSI copies the three signed driver packages to <Program Files>\WebrtcAudioEngine\Driver\ and then calls:

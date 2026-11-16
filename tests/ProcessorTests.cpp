@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // Offline tests for VoiceProcessor (HPF + WebRTC NS chain), no audio engine involved.
 #include "../src/VoiceProcessor.h"
 #include "../src/EchoTimeline.h"

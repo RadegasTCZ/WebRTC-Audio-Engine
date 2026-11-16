@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 <#
 .SYNOPSIS
   Copies the effect's newest log segments to a readable place and shows the end of the newest one.

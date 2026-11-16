@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 <#
 .SYNOPSIS
   Removes the "WebRTC Audio Engine" effect pack: its software-component devices, the three driver

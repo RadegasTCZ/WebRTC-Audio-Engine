@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // Opens the default capture endpoint through WASAPI (shared mode) like an app would,
 // records a few seconds and reports every HRESULT + the peak level.
 // Usage: CaptureTest.exe [default|comms|raw|rawcomms] [seconds] [slider 0..100]

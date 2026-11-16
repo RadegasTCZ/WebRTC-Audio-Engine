@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 <#
 .SYNOPSIS
   Checks that the effect DLL runs on any x64 CPU: every AVX/AVX2/AVX-512 instruction must sit behind a CPU

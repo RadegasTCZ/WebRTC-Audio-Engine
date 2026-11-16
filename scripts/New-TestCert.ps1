@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 <#
 .SYNOPSIS
   One-time: creates a self-made code-signing certificate for test-signing our driver packages and

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 <#
 .SYNOPSIS
   Installs just "WebRTC Audio Engine Settings" from the build folder (admin), for quick app updates while

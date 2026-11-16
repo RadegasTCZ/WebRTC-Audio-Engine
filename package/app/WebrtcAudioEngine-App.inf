@@ -1,4 +1,6 @@
-; WebRTC Audio Engine: settings app as a software component (test-signed experiment).
+; SPDX-License-Identifier: GPL-3.0-or-later
+; Copyright (C) 2026 RadegasTCZ
+; WebRTC Audio Engine: settings app as a software component.
 ; The extension INF adds this component next to the effect pack, so installing the driver also
 ; installs the app: Windows runs "WebrtcAudioEngineSettings.exe /install <version>" from the driver
 ; store (as SYSTEM) once per SoftwareVersion. The exe copies itself to Program Files, adds the

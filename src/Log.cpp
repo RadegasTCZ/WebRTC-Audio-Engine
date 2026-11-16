@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 #include "Log.h"
 #include <objbase.h>
 #include <aclapi.h>

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // Cross-correlates L (mic) and R (reference) of an aecdump WAV (float32, 48 kHz, stereo).
 // Positive lag = the echo in the mic comes AFTER the reference (normal, AEC3 can model it).
 // Negative lag = the echo arrives BEFORE the reference (AEC3 cannot model it).

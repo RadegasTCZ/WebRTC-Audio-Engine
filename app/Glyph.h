@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 #pragma once
 // The app's glyph: rounded "level" bars like a voice waveform. Pure pixel math (no Windows calls), so
 // the tray (drawn at runtime) and the build-time icon generator (tools/MakeIcon.cpp) share one drawing.

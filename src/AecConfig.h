@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // AEC3 tuning presets and the percent -> EchoCanceller3Config mapping, adapted from
 // AEC3-Echo-Canceller (Source/Strength.cpp, Source/AecMapping.cpp, EchoCancellerEngine::createAEC3Instance)
 // by RadegasTCZ.

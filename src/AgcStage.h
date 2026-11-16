@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // Adapted from AEC3-Echo-Canceller (Source/AgcStage.*, Source/OutputLimiter.*) by RadegasTCZ.
 #pragma once
 #include <memory>

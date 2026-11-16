@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // Build-time tool: writes the app icon (.ico, 16..256 px) from the same glyph the tray draws, so no
 // binary image lives in the repo. Usage: MakeIcon <out.ico>
 #include <cstdio>

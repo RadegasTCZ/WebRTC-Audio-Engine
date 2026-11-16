@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // Tray icon + a home-brew flyout: pick a microphone, then quick switches for echo cancellation, noise
 // suppression, automatic gain and cleanup, each with an activity dot; pointing at a row's dot or name
 // (or tabbing to it) shows a small bubble with its live status from the audio effect's telemetry. Drawn with the shared kit (Ui.h); follows the light/dark theme.

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 <#
 .SYNOPSIS
   Builds the installer ..\build\msi\WebrtcAudioEngine-<version>.msi from the driver packages that
@@ -11,7 +13,8 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PackageConfig.ps1')
 
 $wix = Join-Path $env:USERPROFILE '.dotnet\tools\wix.exe'
-if (-not (Test-Path $wix)) { throw 'WiX not found: dotnet tool install --global wix --version 7.0.1' }
+if (-not (Test-Path $wix)) { $wix = (Get-Command wix -ErrorAction SilentlyContinue).Source }
+if (-not $wix) { throw 'WiX not found: dotnet tool install --global wix --version 7.0.1' }
 if (-not $env:PATH.Contains('dotnet')) { $env:PATH = "$env:ProgramFiles\dotnet;$env:PATH" }
 
 $cert = Get-TestCert
@@ -42,7 +45,7 @@ Export-Certificate -Cert $cert -FilePath $cer | Out-Null
 $msi = Join-Path $out "WebrtcAudioEngine-$version.msi"
 Write-Host "Building $msi ..."
 & $wix build (Join-Path $RepoRoot 'installer\Product.wxs') -arch x64 -nologo `
-    -d "ProductVersion=$version" -d "PackageDir=$PackageOut" -d "CertFile=$cer" -d "CaDll=$stagedCa" -d "IconFile=$icon" `
+    -d "ProductVersion=$version" -d "PackageDir=$PackageOut" -d "CertFile=$cer" -d "CaDll=$stagedCa" -d "IconFile=$icon" -d "RepoDir=$RepoRoot" `
     -o $msi
 if ($LASTEXITCODE) { throw 'wix build failed' }
 & $signtool sign /q /sm /s My /sha1 $cert.Thumbprint /fd sha256 /d 'WebRTC Audio Engine' $msi

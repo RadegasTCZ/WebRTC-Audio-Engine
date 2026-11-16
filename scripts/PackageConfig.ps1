@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 # Shared settings for the effect-pack package scripts. Dot-source this file.
 . (Join-Path $PSScriptRoot 'ApoConfig.ps1')
 
@@ -12,8 +14,15 @@ $Script:SwcHardwareId   = 'SWC\VEN_WRTC&AUDIO_EFFECTPACK_WEBRTCENGINE'
 $Script:AppHardwareId   = 'SWC\VEN_WRTC&WEBRTCENGINE_SETTINGSAPP'
 $Script:EffectPackId    = '{9879C461-0BA4-4A7B-9F35-3C04EAC1772D}'
 
+# The Windows Kits folder from the registry (where the SDK/WDK installer put it), else the default place.
+function Get-KitsRoot {
+    $root = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots' -ErrorAction SilentlyContinue).KitsRoot10
+    if (-not $root) { $root = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10' }
+    $root
+}
+
 function Find-KitTool([string]$Name) {
-    $t = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter $Name -EA SilentlyContinue |
+    $t = Get-ChildItem (Join-Path (Get-KitsRoot) 'bin') -Recurse -Filter $Name -EA SilentlyContinue |
          Where-Object { $_.FullName -match '\\(x64|x86)\\' } | Sort-Object FullName -Descending | Select-Object -First 1
     if (-not $t) { throw "$Name not found in the Windows Kits" }
     $t.FullName

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // "/install" and "/uninstall" modes of the settings app (no window).
 //
 // /install [version]: run by Windows (as SYSTEM, from the driver store) when the driver package's software

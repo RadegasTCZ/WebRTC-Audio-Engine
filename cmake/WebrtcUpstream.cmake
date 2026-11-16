@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 # Builds the parts of upstream WebRTC we use (AEC3, NS, AGC2 + RNN VAD, limiter, AudioBuffer and their
 # dependencies) as one static library `webrtc_apm` from the pinned sources that scripts\Fetch-Upstream.ps1
 # downloads into <workspace>\upstream. File lists follow the owner's AEC3-Echo-Canceller plugin recipe

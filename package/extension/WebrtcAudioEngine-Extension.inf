@@ -1,4 +1,6 @@
-; WebRTC Audio Engine: extension INF (test-signed experiment).
+; SPDX-License-Identifier: GPL-3.0-or-later
+; Copyright (C) 2026 RadegasTCZ
+; WebRTC Audio Engine: extension INF.
 ; Same shape as Windows' VocaEffectPack-Extension.inf: attaches to the computer device
 ; (COMPUTER\Generic), not to any audio hardware, and only adds our components: the effect pack
 ; (..\component\WebrtcAudioEngine.inf) and the settings app (..\app\WebrtcAudioEngine-App.inf).

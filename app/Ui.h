@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 #pragma once
 // Small drawing kit shared by the settings window and the tray flyout, so both look the same and
 // follow the Windows light/dark app theme: colors, smooth (anti-aliased) shapes, a switch, a segmented

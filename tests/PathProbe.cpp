@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // Is the speaker path processed (e.g. by Dolby) before the echo reference is tapped?
 //
 // Plays a sequence of steady tones (one per octave band, fixed level) on the default playback device, and

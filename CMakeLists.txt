@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 RadegasTCZ
 cmake_minimum_required(VERSION 3.25)
 project(WebrtcVoiceApo LANGUAGES C CXX)
 

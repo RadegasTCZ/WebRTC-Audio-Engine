@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
 // WebRTC Audio Engine Settings: a small window over HKLM\SOFTWARE\WebrtcVoiceApo.
 // Every change is written immediately; the audio effect picks it up live (within ~10 ms).
 // The window also refreshes itself when the settings change elsewhere (scripts, another instance).
