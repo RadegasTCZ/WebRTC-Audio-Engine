@@ -24,6 +24,8 @@
 namespace
 {
     constexpr wchar_t kOurPack[] = L"{9879C461-0BA4-4A7B-9F35-3C04EAC1772D}";
+    // PKEY_AudioEndpoint_FormFactor (mmdeviceapi.h declares it without a definition unless INITGUID is set).
+    constexpr PROPERTYKEY kFormFactor = {{0x1da5d803, 0xd492, 0x4edd, {0x8c, 0x23, 0xe0, 0xc0, 0xff, 0xee, 0x7f, 0x0e}}, 0};
     constexpr PROPERTYKEY kSelectedPack = {{0xc876062a, 0xa276, 0x4ed6, {0xb1, 0x5b, 0x39, 0x62, 0xe6, 0x90, 0x07, 0xf8}}, 2};
 
     std::wstring GuidOf(const wchar_t* endpointId)
@@ -33,15 +35,46 @@ namespace
     }
 }
 
-std::vector<app::Mic> app::FindMics()
+namespace
 {
-    std::vector<Mic> mics;
-    IMMDeviceEnumerator* en = nullptr;
-    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
-                                   reinterpret_cast<void**>(&en))))
+    // What we know about one capture endpoint (any state: active, disabled, unplugged, not present).
+    struct Endpoint
     {
+        std::wstring guid, name, container, kind;  // kind = "<device description>|<form factor>"
+        DWORD state = 0;
+        bool ourPack = false;
+    };
+
+    std::wstring PropString(IPropertyStore* ps, const PROPERTYKEY& key)
+    {
+        std::wstring s;
+        PROPVARIANT v;
+        PropVariantInit(&v);
+        if (SUCCEEDED(ps->GetValue(key, &v)))
+        {
+            if (v.vt == VT_LPWSTR && v.pwszVal)
+                s = v.pwszVal;
+            else if (v.vt == VT_CLSID && v.puuid)
+            {
+                wchar_t g[40];
+                if (StringFromGUID2(*v.puuid, g, 40)) s = g;
+            }
+            else if (v.vt == VT_UI4)
+                s = std::to_wstring(v.ulVal);
+        }
+        PropVariantClear(&v);
+        return s;
+    }
+
+    std::vector<Endpoint> AllCaptureEndpoints()
+    {
+        std::vector<Endpoint> list;
+        IMMDeviceEnumerator* en = nullptr;
+        if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator),
+                                    reinterpret_cast<void**>(&en))))
+            return list;
         IMMDeviceCollection* col = nullptr;
-        if (SUCCEEDED(en->EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE, &col)))
+        if (SUCCEEDED(en->EnumAudioEndpoints(eCapture, DEVICE_STATEMASK_ALL, &col)))
         {
             UINT n = 0;
             col->GetCount(&n);
@@ -52,15 +85,17 @@ std::vector<app::Mic> app::FindMics()
                 LPWSTR id = nullptr;
                 if (SUCCEEDED(col->Item(i, &dev)) && SUCCEEDED(dev->GetId(&id)) && SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &ps)))
                 {
-                    PROPVARIANT pack, name;
-                    PropVariantInit(&pack);
-                    PropVariantInit(&name);
-                    ps->GetValue(kSelectedPack, &pack);
-                    ps->GetValue(PKEY_Device_FriendlyName, &name);
-                    if (pack.vt == VT_LPWSTR && _wcsicmp(pack.pwszVal, kOurPack) == 0)
-                        mics.push_back({GuidOf(id), name.vt == VT_LPWSTR ? name.pwszVal : L"Microphone", true});
-                    PropVariantClear(&pack);
-                    PropVariantClear(&name);
+                    Endpoint e;
+                    e.guid = GuidOf(id);
+                    dev->GetState(&e.state);
+                    e.name = PropString(ps, PKEY_Device_FriendlyName);
+                    e.container = PropString(ps, PKEY_Device_ContainerId);
+                    const std::wstring desc = PropString(ps, PKEY_Device_DeviceDesc);
+                    const std::wstring form = PropString(ps, kFormFactor);
+                    if (!desc.empty() && !form.empty())
+                        e.kind = desc + L"|" + form;
+                    e.ourPack = _wcsicmp(PropString(ps, kSelectedPack).c_str(), kOurPack) == 0;
+                    list.push_back(std::move(e));
                 }
                 if (ps) ps->Release();
                 if (id) CoTaskMemFree(id);
@@ -69,25 +104,153 @@ std::vector<app::Mic> app::FindMics()
             col->Release();
         }
         en->Release();
+        return list;
     }
-    // Microphones with saved custom settings that are not in the list yet.
-    HKEY devices = nullptr;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, (std::wstring(settings::kRegistryPath) + L"\\Devices").c_str(), 0,
-                      KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE, &devices) == ERROR_SUCCESS)
+
+    // Identity of a microphone that survives a driver update: the physical device (container) and which
+    // of its microphones it is (description + form factor). Windows gives the endpoint a new id then.
+    constexpr wchar_t kContainerValue[] = L"Container";
+    constexpr wchar_t kKindValue[] = L"Kind";
+
+    std::wstring ReadString(HKEY key, const wchar_t* sub, const wchar_t* name)
     {
-        wchar_t sub[128];
+        wchar_t buf[256] = L"";
+        DWORD size = sizeof(buf);
+        if (RegGetValueW(key, sub, name, RRF_RT_REG_SZ, nullptr, buf, &size) != ERROR_SUCCESS)
+            return {};
+        return buf;
+    }
+
+    void WriteString(HKEY key, const wchar_t* sub, const wchar_t* name, const std::wstring& value)
+    {
+        RegSetKeyValueW(key, sub, name, REG_SZ, value.c_str(), static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    }
+
+    // Copies every value of Devices\<from> to Devices\<to> (a new key), then forgets <from>: deleted if we
+    // may, otherwise marked not custom (which hides it). Returns true if the settings arrived.
+    bool MoveDeviceSettings(HKEY devices, const std::wstring& from, const std::wstring& to, const std::wstring& newName)
+    {
+        HKEY src = nullptr, dst = nullptr;
+        if (RegOpenKeyExW(devices, from.c_str(), 0, KEY_QUERY_VALUE, &src) != ERROR_SUCCESS)
+            return false;
+        bool ok = RegCreateKeyExW(devices, to.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &dst, nullptr) == ERROR_SUCCESS;
+        for (DWORD i = 0; ok; ++i)
+        {
+            wchar_t name[64];
+            BYTE data[512];
+            DWORD nameLen = ARRAYSIZE(name), dataLen = sizeof(data), type = 0;
+            const LONG e = RegEnumValueW(src, i, name, &nameLen, nullptr, &type, data, &dataLen);
+            if (e == ERROR_NO_MORE_ITEMS) break;
+            if (e != ERROR_SUCCESS) continue;  // a value too big for us is not one of ours
+            if (_wcsicmp(name, L"Custom") == 0) continue;  // written last, once everything else is there
+            if (type != REG_DWORD && type != REG_SZ) continue;
+            ok = RegSetValueExW(dst, name, 0, type, data, dataLen) == ERROR_SUCCESS;
+        }
+        RegCloseKey(src);
+        if (ok)
+        {
+            if (!newName.empty())
+                WriteString(dst, nullptr, L"Name", newName);
+            const DWORD one = 1;
+            ok = RegSetValueExW(dst, L"Custom", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&one), sizeof(one)) == ERROR_SUCCESS;
+        }
+        if (dst) RegCloseKey(dst);
+        if (!ok)
+            return false;
+        if (RegDeleteTreeW(devices, from.c_str()) == ERROR_SUCCESS)
+            RegDeleteKeyW(devices, from.c_str());
+        else
+        {
+            const DWORD zero = 0;  // no delete right on a key someone else created: hide it instead
+            RegSetKeyValueW(devices, from.c_str(), L"Custom", REG_DWORD, &zero, sizeof(zero));
+        }
+        return true;
+    }
+
+    // Saved microphones whose endpoint is gone (driver update, reinstall) but whose identity matches
+    // exactly one active endpoint without custom settings: their settings move to that endpoint.
+    void CarryOverSettings(HKEY devices, const std::vector<Endpoint>& all)
+    {
+        auto find = [&](const std::wstring& guid) -> const Endpoint* {
+            for (const Endpoint& e : all)
+                if (_wcsicmp(e.guid.c_str(), guid.c_str()) == 0) return &e;
+            return nullptr;
+        };
+        std::vector<std::wstring> saved;
+        wchar_t sub[256];
         for (DWORD i = 0;; ++i)
         {
-            DWORD len = 128;
-            if (RegEnumKeyExW(devices, i, sub, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+            DWORD len = ARRAYSIZE(sub);
+            const LONG e = RegEnumKeyExW(devices, i, sub, &len, nullptr, nullptr, nullptr, nullptr);
+            if (e == ERROR_NO_MORE_ITEMS) break;
+            if (e == ERROR_SUCCESS && Settings::IsDeviceCustom(sub)) saved.push_back(sub);
+        }
+        for (const std::wstring& guid : saved)
+        {
+            const Endpoint* self = find(guid);
+            std::wstring container = ReadString(devices, guid.c_str(), kContainerValue);
+            std::wstring kind = ReadString(devices, guid.c_str(), kKindValue);
+            if (self && (container.empty() || kind.empty()))
+            {
+                // Saved before we kept the identity: take it from Windows while it still knows the endpoint.
+                container = self->container;
+                kind = self->kind;
+                if (!container.empty() && !kind.empty())
+                {
+                    WriteString(devices, guid.c_str(), kContainerValue, container);
+                    WriteString(devices, guid.c_str(), kKindValue, kind);
+                }
+            }
+            if (self && self->state == DEVICE_STATE_ACTIVE) continue;  // in use as it is
+            if (container.empty() || kind.empty()) continue;
+            const Endpoint* target = nullptr;
+            int matches = 0;
+            for (const Endpoint& e : all)
+                if (e.state == DEVICE_STATE_ACTIVE && _wcsicmp(e.container.c_str(), container.c_str()) == 0 &&
+                    _wcsicmp(e.kind.c_str(), kind.c_str()) == 0)
+                {
+                    target = &e;
+                    ++matches;
+                }
+            // Exactly one candidate, and it has no settings of its own yet (never overwrite those).
+            if (matches == 1 && !Settings::IsDeviceCustom(target->guid.c_str()))
+                MoveDeviceSettings(devices, guid, target->guid, target->name);
+        }
+    }
+}
+
+std::vector<app::Mic> app::FindMics()
+{
+    const std::vector<Endpoint> all = AllCaptureEndpoints();
+    HKEY devices = nullptr;
+    // Users may create subkeys and set values here (the installer sets that ACL); read-only otherwise.
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, (std::wstring(settings::kRegistryPath) + L"\\Devices").c_str(), 0,
+                      KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_CREATE_SUB_KEY, &devices) != ERROR_SUCCESS &&
+        RegOpenKeyExW(HKEY_LOCAL_MACHINE, (std::wstring(settings::kRegistryPath) + L"\\Devices").c_str(), 0,
+                      KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE, &devices) != ERROR_SUCCESS)
+        devices = nullptr;
+    if (devices)
+        CarryOverSettings(devices, all);
+
+    std::vector<Mic> mics;
+    for (const Endpoint& e : all)
+        if (e.state == DEVICE_STATE_ACTIVE && e.ourPack)
+            mics.push_back({e.guid, e.name.empty() ? L"Microphone" : e.name, true});
+    // Microphones with saved custom settings that are not in the list yet.
+    if (devices)
+    {
+        wchar_t sub[256];
+        for (DWORD i = 0;; ++i)
+        {
+            DWORD len = ARRAYSIZE(sub);
+            const LONG e = RegEnumKeyExW(devices, i, sub, &len, nullptr, nullptr, nullptr, nullptr);
+            if (e == ERROR_NO_MORE_ITEMS) break;
+            if (e != ERROR_SUCCESS) continue;  // e.g. a name too long to be an endpoint id: skip, keep going
             bool known = false;
             for (const Mic& m : mics) known |= _wcsicmp(m.guid.c_str(), sub) == 0;
             if (known || !Settings::IsDeviceCustom(sub)) continue;
-            wchar_t name[128] = L"";
-            DWORD size = sizeof(name);
-            if (RegGetValueW(devices, sub, L"Name", RRF_RT_REG_SZ, nullptr, name, &size) != ERROR_SUCCESS || !name[0])
-                wcscpy_s(name, L"Microphone");  // missing, too long or not text
-            mics.push_back({sub, name, false});
+            std::wstring name = ReadString(devices, sub, L"Name");
+            mics.push_back({sub, name.empty() ? L"Microphone" : name, false});
         }
         RegCloseKey(devices);
     }
@@ -394,6 +557,8 @@ namespace
         }
         SelectObject(dc, smallFont);
         ui::Text(dc, !SelectedGuid() ? L"These settings apply to every microphone without custom settings."
+                     : g_custom && !g_mics[static_cast<size_t>(g_sel)].connected
+                                     ? L"Not connected. Switch off Custom to forget this microphone."
                      : g_custom      ? L"This microphone uses its own settings."
                                      : L"Uses the default settings. Switch on Custom to give it its own.",
                  Sr(kPad, 74, kW - kPad, 96), t.subtle);
