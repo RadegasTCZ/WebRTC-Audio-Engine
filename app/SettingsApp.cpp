@@ -127,29 +127,42 @@ namespace
         RegSetKeyValueW(key, sub, name, REG_SZ, value.c_str(), static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
     }
 
-    // Copies every value of Devices\<from> to Devices\<to> (a new key), then forgets <from>: deleted if we
-    // may, otherwise marked not custom (which hides it). Returns true if the settings arrived.
-    // A Devices subkey that is a registry link (only possible on keys made before the installer locked the
-    // ACL down): never read, write or delete through it - the app may be running elevated.
-    bool IsLink(HKEY devices, const std::wstring& name)
+    // Opens Devices\<name> as itself, never through a registry link (links are only possible on keys made
+    // before the installer locked the ACL down, and the app may run elevated). Null if it is missing, cannot
+    // be opened or is a link: a key we cannot inspect is treated as unsafe.
+    HKEY OpenDeviceKey(HKEY devices, const std::wstring& name, REGSAM access, bool create)
     {
         HKEY k = nullptr;
-        if (RegOpenKeyExW(devices, name.c_str(), REG_OPTION_OPEN_LINK, KEY_QUERY_VALUE, &k) != ERROR_SUCCESS)
-            return false;
+        const LONG e = create ? RegCreateKeyExW(devices, name.c_str(), 0, nullptr, REG_OPTION_OPEN_LINK, access | KEY_QUERY_VALUE,
+                                                nullptr, &k, nullptr)
+                              : RegOpenKeyExW(devices, name.c_str(), REG_OPTION_OPEN_LINK, access | KEY_QUERY_VALUE, &k);
+        if (e != ERROR_SUCCESS)
+            return nullptr;
         DWORD type = 0;
-        const bool link = RegQueryValueExW(k, L"SymbolicLinkValue", nullptr, &type, nullptr, nullptr) == ERROR_SUCCESS && type == REG_LINK;
-        RegCloseKey(k);
-        return link;
+        if (RegQueryValueExW(k, L"SymbolicLinkValue", nullptr, &type, nullptr, nullptr) == ERROR_SUCCESS && type == REG_LINK)
+        {
+            RegCloseKey(k);
+            return nullptr;
+        }
+        return k;
     }
 
+    bool IsCustom(HKEY key)
+    {
+        DWORD v = 0, size = sizeof(v);
+        return RegGetValueW(key, nullptr, L"Custom", RRF_RT_REG_DWORD, nullptr, &v, &size) == ERROR_SUCCESS && v != 0;
+    }
+
+    // Copies every value of Devices\<from> to Devices\<to>, then hides <from> (Custom = 0) through the same
+    // handle. It is not deleted: users have no delete right under Devices, and deleting by name could follow
+    // a link. Returns true if the settings arrived.
     bool MoveDeviceSettings(HKEY devices, const std::wstring& from, const std::wstring& to, const std::wstring& newName)
     {
-        if (IsLink(devices, from) || IsLink(devices, to))
+        HKEY src = OpenDeviceKey(devices, from, KEY_SET_VALUE, false);
+        if (!src)
             return false;
-        HKEY src = nullptr, dst = nullptr;
-        if (RegOpenKeyExW(devices, from.c_str(), 0, KEY_QUERY_VALUE, &src) != ERROR_SUCCESS)
-            return false;
-        bool ok = RegCreateKeyExW(devices, to.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &dst, nullptr) == ERROR_SUCCESS;
+        HKEY dst = OpenDeviceKey(devices, to, KEY_SET_VALUE, true);
+        bool ok = dst != nullptr;
         for (DWORD i = 0; ok; ++i)
         {
             wchar_t name[64];
@@ -157,12 +170,12 @@ namespace
             DWORD nameLen = ARRAYSIZE(name), dataLen = sizeof(data), type = 0;
             const LONG e = RegEnumValueW(src, i, name, &nameLen, nullptr, &type, data, &dataLen);
             if (e == ERROR_NO_MORE_ITEMS) break;
-            if (e != ERROR_SUCCESS) continue;  // a value too big for us is not one of ours
+            if (e == ERROR_MORE_DATA) continue;  // a value too big for us is not one of ours
+            if (e != ERROR_SUCCESS) { ok = false; break; }  // e.g. the key was deleted meanwhile
             if (_wcsicmp(name, L"Custom") == 0) continue;  // written last, once everything else is there
             if (type != REG_DWORD && type != REG_SZ) continue;
             ok = RegSetValueExW(dst, name, 0, type, data, dataLen) == ERROR_SUCCESS;
         }
-        RegCloseKey(src);
         if (ok)
         {
             if (!newName.empty())
@@ -170,21 +183,20 @@ namespace
             const DWORD one = 1;
             ok = RegSetValueExW(dst, L"Custom", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&one), sizeof(one)) == ERROR_SUCCESS;
         }
-        if (dst) RegCloseKey(dst);
-        if (!ok)
-            return false;
-        // Our keys have values only, no subkeys: a plain delete is enough and never descends anywhere.
-        if (RegDeleteKeyW(devices, from.c_str()) == ERROR_SUCCESS) {}
-        else
+        if (ok)
         {
-            const DWORD zero = 0;  // no delete right on a key someone else created: hide it instead
-            RegSetKeyValueW(devices, from.c_str(), L"Custom", REG_DWORD, &zero, sizeof(zero));
+            const DWORD zero = 0;
+            RegSetValueExW(src, L"Custom", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&zero), sizeof(zero));
         }
-        return true;
+        if (dst) RegCloseKey(dst);
+        RegCloseKey(src);
+        return ok;
     }
 
-    // Saved microphones whose endpoint is gone (driver update, reinstall) but whose identity matches
-    // exactly one active endpoint without custom settings: their settings move to that endpoint.
+    // Saved microphones whose endpoint Windows no longer has (a driver update or reinstall gives the mic a new
+    // endpoint id) move their settings to the one endpoint with the same identity. Only then: an unplugged or
+    // disabled mic keeps its settings, and nothing moves when the identity is ambiguous (two saved keys or
+    // two present endpoints claim it), or when the new endpoint already has settings of its own.
     void CarryOverSettings(HKEY devices, const std::vector<Endpoint>& all)
     {
         auto find = [&](const std::wstring& guid) -> const Endpoint* {
@@ -192,45 +204,56 @@ namespace
                 if (_wcsicmp(e.guid.c_str(), guid.c_str()) == 0) return &e;
             return nullptr;
         };
-        std::vector<std::wstring> saved;
+        struct Saved { std::wstring guid, container, kind; const Endpoint* self; };
+        std::vector<Saved> saved;
         wchar_t sub[256];
         for (DWORD i = 0;; ++i)
         {
             DWORD len = ARRAYSIZE(sub);
             const LONG e = RegEnumKeyExW(devices, i, sub, &len, nullptr, nullptr, nullptr, nullptr);
             if (e == ERROR_NO_MORE_ITEMS) break;
-            if (e == ERROR_SUCCESS && Settings::IsDeviceCustom(sub)) saved.push_back(sub);
-        }
-        for (const std::wstring& guid : saved)
-        {
-            const Endpoint* self = find(guid);
-            std::wstring container = ReadString(devices, guid.c_str(), kContainerValue);
-            std::wstring kind = ReadString(devices, guid.c_str(), kKindValue);
-            if (self && (container.empty() || kind.empty()))
+            if (e == ERROR_MORE_DATA) continue;  // a name too long to be an endpoint id
+            if (e != ERROR_SUCCESS) return;      // e.g. Devices was deleted meanwhile: try again next time
+            HKEY k = OpenDeviceKey(devices, sub, KEY_SET_VALUE, false);
+            if (!k) k = OpenDeviceKey(devices, sub, 0, false);  // read-only is enough to list it
+            if (!k) continue;
+            if (IsCustom(k))
             {
-                // Saved before we kept the identity: take it from Windows while it still knows the endpoint.
-                container = self->container;
-                kind = self->kind;
-                if (!container.empty() && !kind.empty())
+                Saved s{sub, ReadString(k, nullptr, kContainerValue), ReadString(k, nullptr, kKindValue), find(sub)};
+                if (s.self && (s.container.empty() || s.kind.empty()) && !s.self->container.empty() && !s.self->kind.empty())
                 {
-                    WriteString(devices, guid.c_str(), kContainerValue, container);
-                    WriteString(devices, guid.c_str(), kKindValue, kind);
+                    // Saved before we kept the identity: take it from Windows while it still knows the endpoint.
+                    s.container = s.self->container;
+                    s.kind = s.self->kind;
+                    WriteString(k, nullptr, kContainerValue, s.container);
+                    WriteString(k, nullptr, kKindValue, s.kind);
                 }
+                saved.push_back(std::move(s));
             }
-            if (self && self->state == DEVICE_STATE_ACTIVE) continue;  // in use as it is
-            if (container.empty() || kind.empty()) continue;
+            RegCloseKey(k);
+        }
+        auto same = [](const std::wstring& c1, const std::wstring& k1, const std::wstring& c2, const std::wstring& k2) {
+            return !c1.empty() && !k1.empty() && _wcsicmp(c1.c_str(), c2.c_str()) == 0 && _wcsicmp(k1.c_str(), k2.c_str()) == 0;
+        };
+        for (const Saved& s : saved)
+        {
+            if (s.self && s.self->state != DEVICE_STATE_NOTPRESENT) continue;  // still there (maybe unplugged)
+            int claims = 0;
+            for (const Saved& o : saved) claims += same(s.container, s.kind, o.container, o.kind) ? 1 : 0;
+            if (claims != 1) continue;
             const Endpoint* target = nullptr;
-            int matches = 0;
+            int present = 0;
             for (const Endpoint& e : all)
-                if (e.state == DEVICE_STATE_ACTIVE && _wcsicmp(e.container.c_str(), container.c_str()) == 0 &&
-                    _wcsicmp(e.kind.c_str(), kind.c_str()) == 0)
+                if (e.state != DEVICE_STATE_NOTPRESENT && same(s.container, s.kind, e.container, e.kind))
                 {
                     target = &e;
-                    ++matches;
+                    ++present;
                 }
-            // Exactly one candidate, and it has no settings of its own yet (never overwrite those).
-            if (matches == 1 && !Settings::IsDeviceCustom(target->guid.c_str()))
-                MoveDeviceSettings(devices, guid, target->guid, target->name);
+            if (present != 1 || target->state != DEVICE_STATE_ACTIVE) continue;
+            bool targetSaved = false;
+            for (const Saved& o : saved) targetSaved |= _wcsicmp(o.guid.c_str(), target->guid.c_str()) == 0;
+            if (!targetSaved && !Settings::IsDeviceCustom(target->guid.c_str()))
+                MoveDeviceSettings(devices, s.guid, target->guid, target->name);
         }
     }
 }
@@ -261,7 +284,8 @@ std::vector<app::Mic> app::FindMics()
             DWORD len = ARRAYSIZE(sub);
             const LONG e = RegEnumKeyExW(devices, i, sub, &len, nullptr, nullptr, nullptr, nullptr);
             if (e == ERROR_NO_MORE_ITEMS) break;
-            if (e != ERROR_SUCCESS) continue;  // e.g. a name too long to be an endpoint id: skip, keep going
+            if (e == ERROR_MORE_DATA) continue;  // a name too long to be an endpoint id: skip, keep going
+            if (e != ERROR_SUCCESS) break;       // e.g. Devices was deleted meanwhile
             bool known = false;
             for (const Mic& m : mics) known |= _wcsicmp(m.guid.c_str(), sub) == 0;
             if (known || !Settings::IsDeviceCustom(sub)) continue;

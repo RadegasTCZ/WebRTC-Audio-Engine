@@ -191,22 +191,38 @@ namespace
         return Arm();
     }
 
-    void CALLBACK OnChanged(PVOID, BOOLEAN) noexcept
+    // A deletion may not signal the event: the wait also times out every few seconds to check.
+    constexpr DWORD kKeyCheckMs = 2000;
+
+    void CALLBACK OnChanged(PVOID, BOOLEAN timedOut) noexcept
     {
-        // Re-arm first, then read: a value written while we read fires the next notification instead of
-        // being missed (writers set several values in a row; the first one wakes us up).
-        // Callbacks can overlap (the re-arm above can fire while this one runs): Store() has a single
-        // writer per snapshot, and the hook must see changes in order.
+        if (timedOut)
+        {
+            // Nothing changed. Only act if the key is (now known to be) gone: then try to reopen it.
+            if (!g_keyLost.load() && g_key &&
+                RegQueryInfoKeyW(g_key, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                                 nullptr) != ERROR_KEY_DELETED)
+                return;
+        }
+        else
+        {
+            // Coalesce bursts (the app writes ~17 values per change; a script may flip values in a loop): every
+            // value written during this pause is picked up by the one read below, so stages are rebuilt once.
+            // Before taking the lock, so nobody waits on it meanwhile.
+            Sleep(150);
+        }
+        // Callbacks can overlap: Store() has a single writer per snapshot, and the hook must see changes in order.
         AcquireSRWLockExclusive(&g_changeLock);
-        // Coalesce bursts (the app writes ~17 values per change; a script may flip values in a loop): every
-        // value written during this pause is picked up by the one read below, so stages are rebuilt once.
-        Sleep(150);
+        // Re-arm first, then read: a value written while we read fires the next notification instead of
+        // being missed.
         if (!Arm() && !Reopen())
         {
             if (!g_keyLost.exchange(true))
-                apolog::Write(L"[settings] settings key deleted: live updates paused until it exists again");
+                apolog::Write(L"[settings] settings key deleted: current settings kept, live updates paused until it exists again");
+            ReleaseSRWLockExclusive(&g_changeLock);  // nothing to read: keep what streams use now
+            return;
         }
-        else if (g_keyLost.exchange(false))
+        if (g_keyLost.exchange(false))
             apolog::Write(L"[settings] settings key back: live updates resumed");
         bool any = false;
         AcquireSRWLockShared(&g_snapLock);
@@ -378,10 +394,10 @@ namespace settings
             return;
         }
         g_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (g_event)
-            Arm();
+        if (g_event && !Arm())
+            g_keyLost.store(true);  // the periodic check reopens it
         // Lives for the rest of the process; the DLL is then never unloaded (DllCanUnloadNow).
-        if (!g_event || !RegisterWaitForSingleObject(&g_wait, g_event, OnChanged, nullptr, INFINITE, WT_EXECUTEDEFAULT))
+        if (!g_event || !RegisterWaitForSingleObject(&g_wait, g_event, OnChanged, nullptr, kKeyCheckMs, WT_EXECUTELONGFUNCTION))
         {
             apolog::Write(L"[settings] could not start the live watcher (error %lu): retrying at the next stream", GetLastError());
             if (g_event) { CloseHandle(g_event); g_event = nullptr; }

@@ -19,7 +19,7 @@ param([string]$Root, [switch]$Force, [switch]$SkipVerify)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $workspace = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$root = if ($Root) { $Root } else { Join-Path $workspace 'upstream' }
+$root = if ($Root) { [IO.Path]::GetFullPath((Join-Path (Get-Location).Path $Root)) } else { Join-Path $workspace 'upstream' }
 
 $webrtcRev   = 'b58dcf8fec3ad5291fb99c7e29650737ae7db953'   # 2026-10-02
 $abseilRev   = '972e4ab4a076fca3adbba69b64f2fcdbc78d0e52'   # 2026-03-11
@@ -27,18 +27,22 @@ $chromiumRev = '6eabe54fa10922ba0d3f9a8e5a01055d371ebaf7'   # chromium/src/third
 
 # Content hashes of the three folders exactly as fetched by this script (see Get-TreeHash).
 $expected = @{
-    'webrtc'     = '59c2a701d8739cf3828534d3b1c39bb9df5661d1ee7adc912f24ce43dfbf4a17'
-    'chromium'   = '51ca3e62622da7f2cc2cf495a3ba555b1938dc8f2b1d2e4db0a4e6c6a33ccc4c'
-    'abseil-cpp' = '0cc1b7bea190fdd1237e398435bff5deb2534b1a4c3071642f7fe80d52002998'
+    'webrtc'     = 'c3b82ef01c177d9596dfdeea667b4128aebce5d09e68cd9ffe5444a9f123ac29'
+    'chromium'   = '31a496dcb69059c9f0c6c01c495ae6404b72ea1a4e1c749bd0ffa0e118b2ebfc'
+    'abseil-cpp' = '617ab02ebb3376781439030a2cb08078fc68f9bcef7800e77f6c5876531285f3'
 }
 
-# SHA-256 over every file: sorted "<relative path>NUL<SHA-256 of the content>" lines.
+# SHA-256 over every file: ordinally sorted "<relative path>NUL<SHA-256 of the content>" lines.
 function Get-TreeHash([string]$dir) {
     $base = (Resolve-Path $dir).Path
+    $fileSha = [Security.Cryptography.SHA256]::Create()
     $lines = Get-ChildItem $base -Recurse -File | ForEach-Object {
         $rel = $_.FullName.Substring($base.Length + 1).Replace('\', '/')
-        "$rel`0$((Get-FileHash $_.FullName -Algorithm SHA256).Hash)"
-    } | Sort-Object -CaseSensitive
+        "$rel`0$(-join ($fileSha.ComputeHash([IO.File]::ReadAllBytes($_.FullName)) | ForEach-Object { $_.ToString('X2') }))"
+    }
+    # Ordinal sort: Sort-Object follows the PC's language settings and the PowerShell version.
+    $lines = [string[]]@($lines)
+    [Array]::Sort($lines, [StringComparer]::Ordinal)
     $sha = [Security.Cryptography.SHA256]::Create()
     -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))) | ForEach-Object { $_.ToString('x2') })
 }

@@ -132,8 +132,9 @@ namespace
         }
     }
 
-    // Keeps the newest kKeepDumps diagnostic recordings (names hold the time, so name order is age order).
-    void CleanupDumps() noexcept
+    // Keeps the newest kKeepDumps diagnostic recordings (names hold the time, so name order is age order),
+    // never deleting `keep` (the one just written: after a clock change it may not sort as the newest).
+    void CleanupDumps(const wchar_t* keep) noexcept
     {
         try
         {
@@ -144,12 +145,13 @@ namespace
             if (f == INVALID_HANDLE_VALUE)
                 return;
             do
-                if (!(fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))
+                if (!(fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) &&
+                    _wcsicmp(fd.cFileName, keep) != 0)
                     names.push_back(fd.cFileName);
             while (FindNextFileW(f, &fd));
             FindClose(f);
             std::sort(names.begin(), names.end(), std::greater<>());
-            for (size_t i = kKeepDumps; i < names.size(); ++i)
+            for (size_t i = kKeepDumps - 1; i < names.size(); ++i)
                 DeleteFileW((std::wstring(g_dir) + L"\\" + names[i]).c_str());
         }
         catch (...)
@@ -255,7 +257,7 @@ namespace apolog
         if (g_dirState == 1 && SUCCEEDED(StringCchPrintfW(pathOut, MAX_PATH, L"%s\\%s", g_dir, name)))
         {
             // CREATE_NEW + never follow a link (same rules as the log).
-            HANDLE h = CreateFileW(pathOut, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW,
+            HANDLE h = CreateFileW(pathOut, GENERIC_WRITE | DELETE, FILE_SHARE_READ, nullptr, CREATE_NEW,
                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
             if (h != INVALID_HANDLE_VALUE)
             {
@@ -273,11 +275,16 @@ namespace apolog
                     return good;
                 };
                 ok = put(head, headBytes) && put(data, bytes);
-                CloseHandle(h);
                 if (!ok)
-                    DeleteFileW(pathOut);
+                {
+                    // A partial recording goes, through our own handle (even if a reader has it open).
+                    FILE_DISPOSITION_INFO del{TRUE};
+                    SetFileInformationByHandle(h, FileDispositionInfo, &del, sizeof(del));
+                }
+                CloseHandle(h);
+                if (ok)
+                    CleanupDumps(name);
             }
-            CleanupDumps();
         }
         ReleaseSRWLockExclusive(&g_lock);
         return ok;

@@ -55,6 +55,9 @@ namespace
     } g_hookInstaller;
 
 
+    // The AGC's learnt gain is carried into rebuilt stages: never carry a NaN along.
+    float FiniteOr0(float v) noexcept { return std::isfinite(v) ? v : 0.0f; }
+
     // AudioBuffer::CopyFrom/CopyTo clamp to +-1.0 (FloatToFloatS16 / FloatS16ToFloat). Our chain may run
     // above full scale before the limiter (e.g. +30 dB slider gain), so load/store the int16-range data
     // directly, without clamping. Mono, same rate: no resampling or downmixing is involved.
@@ -89,8 +92,10 @@ void VoiceProcessor::Register()
         // A settings change that landed between the caller's snapshot and now was applied to the other
         // processors only: catch up (a no-op when nothing changed). Only with the live watcher running:
         // otherwise nothing can change, and the caller's settings (e.g. a test's) are the truth.
+        // Best effort: out of memory here keeps the stages the caller built, it must not fail the stream.
         if (settings::WatcherStarted())
-            RequestStageParams(settings::Current(m_settingsIndex));
+            try { RequestStageParams(settings::Current(m_settingsIndex)); }
+            catch (...) {}
     }
     catch (...)  // out of memory: never leave the lock held (every other stream would hang on it)
     {
@@ -436,7 +441,7 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
     m_agcHandoff.Clear();
     m_agcRequested = ParamsFrom(initial);
     m_agc = std::make_unique<AgcStage>(m_agcRequested);
-    m_agcGainDb.store(m_agc->LastGainDb());
+    m_agcGainDb.store(FiniteOr0(m_agc->LastGainDb()));
 
     m_settings = initial;
     m_level = static_cast<int>(initial.nsLevel);
@@ -539,9 +544,11 @@ void VoiceProcessor::ProcessBlock() noexcept
         // Sanitize, apply the input gain (also in bypass: it is the volume control), delay, downmix.
         for (int i = 0; i < kBlock; ++i)
         {
-            // Clamped too: a finite but absurd sample (driver bug) would overflow the energy sums downstream.
+            // The raw sample is clamped BEFORE the gain: a finite but absurd value (driver bug) would overflow
+            // the energy sums downstream. After the gain (up to +40 dB) the chain may run far above full scale
+            // on purpose; the limiter at the end brings it back, so nothing is clipped here.
             const float x = c.in[i];
-            c.in[i] = std::clamp((std::isfinite(x) ? x : 0.0f) * m_gain.At(i), -8.0f, 8.0f);
+            c.in[i] = std::clamp(std::isfinite(x) ? x : 0.0f, -4.0f, 4.0f) * m_gain.At(i);
         }
         c.mic.Run(c.in.data(), delayFrom, delayTo);   // before everything, so bypass stays aligned
         for (int i = 0; i < kBlock; ++i)
@@ -629,7 +636,7 @@ void VoiceProcessor::ProcessBlock() noexcept
     // 4. AGC2 (always runs so its gain stays adapted; mixed in when enabled).
     std::memcpy(m_tmp.data(), m_voice.data(), sizeof(m_tmp));
     m_agc->Process(m_tmp.data());
-    m_agcGainDb.store(m_agc->LastGainDb(), std::memory_order_relaxed);
+    m_agcGainDb.store(FiniteOr0(m_agc->LastGainDb()), std::memory_order_relaxed);
     for (int i = 0; i < kBlock; ++i)
         m_voice[i] += m_agcMix.At(i) * (m_tmp[i] - m_voice[i]);
 
@@ -640,16 +647,15 @@ void VoiceProcessor::ProcessBlock() noexcept
         m_voice[i] += m_limMix.At(i) * (m_tmp[i] - m_voice[i]);
 
     // Watchdog: the inputs are sanitised, so this should never fire; if a stage ever produces NaN/Inf
-    // anyway, the apps get silence for this block instead of garbage, our own filters start clean,
-    // and the count shows up in the log at stream stop.
+    // anyway, the apps get the latency-matched unprocessed mic for this block (clipped to full scale)
+    // instead of garbage or silence, and the count shows up in the log at stream stop.
     float check = 0.0f;
     for (int i = 0; i < kBlock; ++i)
         check += m_voice[i] * 0.0f;   // stays 0 unless some sample is NaN or Inf
     if (check != 0.0f || !std::isfinite(check))
     {
-        m_voice.fill(0.0f);
-        m_hpf.z1 = m_hpf.z2 = 0;
-        m_lpf.z1 = m_lpf.z2 = 0;
+        for (int i = 0; i < kBlock; ++i)
+            m_voice[i] = std::clamp(m_ch[0].delayed[i], -1.0f, 1.0f);
         m_nonFiniteBlocks.fetch_add(1, std::memory_order_relaxed);
     }
 

@@ -455,6 +455,7 @@ namespace
         // A repair of the same build (any user can start one) changes nothing in the driver store: then the
         // audio engine keeps running instead of cutting everyone's sound.
         std::optional<AudioPause> pause;
+        bool installedOnDevice = false;  // a package went onto a device (e.g. a repair of a removed device)
         if (AllAlreadyInStore(driverDir, before))
             Log(L"the same packages are already installed: Windows Audio keeps running");
         else
@@ -465,8 +466,13 @@ namespace
             BOOL reboot = FALSE;
             // Components first, so they are in the store when the extension creates their software devices.
             // ERROR_NO_MORE_ITEMS: the package is in the store, but a device already has an equal or better one.
-            if (DiInstallDriverW(nullptr, inf.c_str(), 0, &reboot) || GetLastError() == ERROR_NO_MORE_ITEMS)
+            if (DiInstallDriverW(nullptr, inf.c_str(), 0, &reboot))
+            {
                 Log(L"installed %s%s", kInfs[i], reboot ? L" (restart needed)" : L"");
+                installedOnDevice = true;
+            }
+            else if (GetLastError() == ERROR_NO_MORE_ITEMS)
+                Log(L"installed %s (devices already up to date)", kInfs[i]);
             else
             {
                 const DWORD e = GetLastError();
@@ -474,6 +480,12 @@ namespace
                 result = ERROR_INSTALL_FAILURE;
                 break;
             }
+        }
+        // The store had everything, but a device still got it now: Windows Audio must load the effect.
+        if (!pause && installedOnDevice && result == ERROR_SUCCESS)
+        {
+            Log(L"a device was (re)installed: restarting Windows Audio");
+            pause.emplace();
         }
         }  // Windows Audio starts again here (if it was stopped)
         if (result != ERROR_SUCCESS) return result;

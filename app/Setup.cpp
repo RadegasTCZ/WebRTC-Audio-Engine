@@ -181,6 +181,17 @@ namespace
     }
     LONG SetDword(HKEY k, const wchar_t* name, DWORD v) { return RegSetValueExW(k, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&v), sizeof(v)); }
 
+    // Owner and ACL of one key from SDDL, without touching its subkeys.
+    LONG SetKeySddl(HKEY key, const wchar_t* sddl)
+    {
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, nullptr))
+            return static_cast<LONG>(GetLastError());
+        const LONG e = RegSetKeySecurity(key, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, sd);
+        LocalFree(sd);
+        return e;
+    }
+
     // HKLM\SOFTWARE\WebrtcVoiceApo (+ Devices): Users, the audio engine (LOCAL SERVICE) and app containers
     // (Windows Settings toggles our effects through the APO) may change values and add microphone subkeys.
     // Same rights as Set-VoiceSettings.ps1 grants.
@@ -189,52 +200,30 @@ namespace
         HKEY k = nullptr;
         LONG r = RegCreateKeyExW(HKEY_LOCAL_MACHINE, settings::kRegistryPath, 0, nullptr, 0, KEY_ALL_ACCESS, nullptr, &k, nullptr);
         if (r != ERROR_SUCCESS) return r;
-        PACL dacl = nullptr, newDacl = nullptr;
-        PSECURITY_DESCRIPTOR sd = nullptr;
-        r = static_cast<LONG>(GetSecurityInfo(k, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl, nullptr, &sd));
-        if (r == ERROR_SUCCESS)
-        {
-            const wchar_t* sids[] = {L"S-1-5-32-545", L"S-1-5-19", L"S-1-15-2-1", L"S-1-15-2-2"};
-            EXPLICIT_ACCESSW ea[4]{};
-            PSID psid[4]{};
-            for (int i = 0; i < 4; ++i)
-            {
-                ConvertStringSidToSidW(sids[i], &psid[i]);
-                ea[i].grfAccessPermissions = KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_CREATE_SUB_KEY | KEY_ENUMERATE_SUB_KEYS | KEY_NOTIFY | KEY_READ;
-                ea[i].grfAccessMode = GRANT_ACCESS;
-                ea[i].grfInheritance = SUB_CONTAINERS_ONLY_INHERIT;
-                ea[i].Trustee.TrusteeForm = TRUSTEE_IS_SID;
-                ea[i].Trustee.ptstrName = static_cast<LPWSTR>(psid[i]);
-            }
-            r = static_cast<LONG>(SetEntriesInAclW(4, ea, dacl, &newDacl));
-            if (r == ERROR_SUCCESS)
-                r = static_cast<LONG>(SetSecurityInfo(k, SE_REGISTRY_KEY, DACL_SECURITY_INFORMATION, nullptr, nullptr, newDacl, nullptr));
-            for (PSID s : psid) LocalFree(s);
-            LocalFree(newDacl);
-            LocalFree(sd);
-        }
-        // Devices: its own protected ACL. Inherited, HKLM\SOFTWARE's CREATOR OWNER entry would give whoever creates
-        // a microphone subkey full control of it (including turning it into a registry link that the audio
-        // engine or an elevated app would then write through). Users etc. get the same rights as above, on
-        // every subkey; only SYSTEM and Administrators get more. Opened as a link, never through one.
+        // Both ACLs are set with RegSetKeySecurity: on this key only. SetSecurityInfo would also rewrite every
+        // existing subkey (possibly user-made, possibly links) while we run as SYSTEM.
+        // The settings key: Users, LOCAL SERVICE and app containers may read, change values and watch it
+        // (0x2001b), but not add subkeys; nothing inherits from HKLM\SOFTWARE (no CREATOR OWNER entry).
+        r = SetKeySddl(k, L"O:BAD:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;;0x2001b;;;BU)(A;;0x2001b;;;LS)(A;;0x2001b;;;AC)"
+                          L"(A;;0x2001b;;;S-1-15-2-2)");
+        if (r != ERROR_SUCCESS)
+            Log(L"warning: settings key ACL not set (error %ld)", r);
+        // Devices: the same accounts may also add microphone subkeys (0x2001f), which inherit those rights.
+        // OWNER RIGHTS limits whoever creates a subkey to the same: without it the creator could change its
+        // ACL and lock the audio engine or other users out. No one but SYSTEM and Administrators may create
+        // links. Opened as a link, never through one.
         HKEY dev = nullptr;
-        if (RegCreateKeyExW(k, L"Devices", 0, nullptr, REG_OPTION_OPEN_LINK, KEY_QUERY_VALUE | WRITE_DAC, nullptr, &dev, nullptr) ==
-            ERROR_SUCCESS)
+        if (RegCreateKeyExW(k, L"Devices", 0, nullptr, REG_OPTION_OPEN_LINK, KEY_QUERY_VALUE | WRITE_DAC | WRITE_OWNER, nullptr,
+                            &dev, nullptr) == ERROR_SUCCESS)
         {
             DWORD type = 0;
-            PSECURITY_DESCRIPTOR devSd = nullptr;
             if (RegQueryValueExW(dev, L"SymbolicLinkValue", nullptr, &type, nullptr, nullptr) == ERROR_SUCCESS && type == REG_LINK)
                 Log(L"warning: the Devices settings key is a registry link: left alone");
-            else if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                         L"D:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;0x2001f;;;BU)(A;OICI;0x2001f;;;LS)"
-                         L"(A;OICI;0x2001f;;;AC)(A;OICI;0x2001f;;;S-1-15-2-2)",
-                         SDDL_REVISION_1, &devSd, nullptr))
-            {
-                // RegSetKeySecurity: this key only, nothing propagated into (possibly user-made) subkeys.
-                if (const LONG e = RegSetKeySecurity(dev, DACL_SECURITY_INFORMATION, devSd); e != ERROR_SUCCESS)
-                    Log(L"warning: Devices key ACL not set (error %ld)", e);
-                LocalFree(devSd);
-            }
+            else if (const LONG e = SetKeySddl(dev, L"O:BAD:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;0x2001f;;;BU)"
+                                                    L"(A;OICI;0x2001f;;;LS)(A;OICI;0x2001f;;;AC)(A;OICI;0x2001f;;;S-1-15-2-2)"
+                                                    L"(A;OICI;0x2001f;;;OW)");
+                     e != ERROR_SUCCESS)
+                Log(L"warning: Devices key ACL not set (error %ld)", e);
             RegCloseKey(dev);
         }
         RegCloseKey(k);
@@ -425,10 +414,13 @@ namespace
             err = GetLastError();
         }
         // No parking place (e.g. someone created the ProgramData folder before us, so it is not trusted):
-        // the file stays where it is until the next restart, then Windows deletes it.
-        if (MoveFileExW(path.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT))
+        // rename it in place (same protected folder) and delete that name at the next restart. Never schedule
+        // `path` itself: a new copy installed there before the restart would be deleted instead.
+        const std::wstring old = path + L".old-" + std::to_wstring(GetTickCount64());
+        if (MoveFileExW(path.c_str(), old.c_str(), 0))
         {
-            Log(L"%s is in use: it will be deleted at the next restart", path.c_str());
+            MoveFileExW(old.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+            Log(L"%s is in use: renamed, deleted at the next restart", path.c_str());
             return true;
         }
         Log(L"could not remove %s (error %lu)", path.c_str(), err);
@@ -570,6 +562,8 @@ namespace setup
             return static_cast<int>(err ? err : ERROR_ACCESS_DENIED);
         }
         RemoveDirectoryW(InstallDir().c_str());
+        // Admin-only key (with the admin-only Diagnostics subkey): the whole tree goes.
+        RegDeleteTreeW(HKEY_LOCAL_MACHINE, app::kAppKey);
         RegDeleteKeyW(HKEY_LOCAL_MACHINE, app::kAppKey);
         RegDeleteKeyExW(HKEY_LOCAL_MACHINE, kDsmSoftwareKey, KEY_WOW64_64KEY, 0);
         Log(L"uninstalled (settings kept)");

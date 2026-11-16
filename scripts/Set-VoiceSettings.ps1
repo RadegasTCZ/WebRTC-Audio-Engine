@@ -49,20 +49,25 @@ if (-not $k) {
     Write-Host "Created HKLM\$path."
 }
 if ($isAdmin) {
-    # Who may change values: Users (settings app, scripts) and the audio engine account plus app
-    # containers (Windows Settings toggles our effects through the APO inside audiodg). They may also create
-    # the per-microphone subkeys (Devices\{guid}), which inherit the same rights.
-    $acl = $k.GetAccessControl()
-    foreach ($sid in 'S-1-5-32-545', 'S-1-5-19', 'S-1-15-2-1', 'S-1-15-2-2') {   # Users, LOCAL SERVICE, ALL (RESTRICTED) APP PACKAGES
-        $acl.AddAccessRule([System.Security.AccessControl.RegistryAccessRule]::new(
-            [System.Security.Principal.SecurityIdentifier]::new($sid),
-            [System.Security.AccessControl.RegistryRights]'QueryValues, SetValue, CreateSubKey, EnumerateSubKeys, Notify, ReadKey',
-            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit,
-            [System.Security.AccessControl.PropagationFlags]::None,
-            [System.Security.AccessControl.AccessControlType]::Allow))
+    # Same ACLs as the installer (app\Setup.cpp PrepareSettingsKey): Users, the audio engine account and app
+    # containers may change values; under Devices they may also add the per-microphone subkeys. Set with
+    # RegSetKeySecurity, on each key only: .NET's SetAccessControl would also rewrite every subkey.
+    Add-Type -Namespace WebrtcAudioEngine -Name Native -MemberDefinition @'
+[DllImport("advapi32.dll")] public static extern int RegSetKeySecurity(Microsoft.Win32.SafeHandles.SafeRegistryHandle key, int info, byte[] sd);
+'@
+    $setSddl = {
+        param($key, $sddl)
+        $sd = [System.Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+        $bytes = [byte[]]::new($sd.BinaryLength); $sd.GetBinaryForm($bytes, 0)
+        $e = [WebrtcAudioEngine.Native]::RegSetKeySecurity($key.Handle, 0x5, $bytes)   # OWNER + DACL
+        if ($e) { Write-Warning "ACL not set on $($key.Name) (error $e)" }
     }
-    $k.SetAccessControl($acl)
-    $dev = $k.CreateSubKey('Devices'); $dev.Close()
+    $full = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($path, 'ReadWriteSubTree', 'FullControl')
+    & $setSddl $full 'O:BAD:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;;0x2001b;;;BU)(A;;0x2001b;;;LS)(A;;0x2001b;;;AC)(A;;0x2001b;;;S-1-15-2-2)'
+    $full.CreateSubKey('Devices').Close()
+    $dev = $full.OpenSubKey('Devices', 'ReadWriteSubTree', 'FullControl')
+    & $setSddl $dev 'O:BAD:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)(A;OICI;0x2001f;;;BU)(A;OICI;0x2001f;;;LS)(A;OICI;0x2001f;;;AC)(A;OICI;0x2001f;;;S-1-15-2-2)(A;OICI;0x2001f;;;OW)'
+    $dev.Close(); $full.Close()
 }
 $dw = { param($name, $val) $k.SetValue($name, [int]$val, 'DWord') }
 if ($PSBoundParameters.ContainsKey('Bypass'))  { & $dw 'Bypass' (& $onOff $Bypass) }
