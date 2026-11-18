@@ -10,7 +10,7 @@
 
 // Keeps the echo reference in step with the microphone (2026-11-14).
 //
-// Measured on the owner's laptop: Windows hands the loopback reference over in lockstep with the mic
+// Measured on a Realtek laptop: Windows hands the loopback reference over in lockstep with the mic
 // (480 samples per call), but its CONTENT runs ~60 ppm fast; the surplus arrives as one extra 10 ms packet
 // every ~165 s. Read 1:1, the echo slides ~0.6 ms per 10 s against the reference and jumps back at each
 // extra packet, so AEC3 keeps re-learning. The queue length cannot show the content rate (it only steps

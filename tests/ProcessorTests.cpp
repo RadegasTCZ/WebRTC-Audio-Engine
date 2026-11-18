@@ -888,7 +888,7 @@ int main()
         // echo 30 ms after the sound was played; 6 minutes, echo timing ticking every second (the rate is learnt
         // from the echo slide). Two delivery models:
         // - timely:   each 480-sample chunk is delivered when it has finished playing (stamped then);
-        // - lockstep: as measured on the owner's laptop: one chunk per capture block, and the surplus (deficit)
+        // - lockstep: as measured on a Realtek laptop: one chunk per capture block, and the surplus (deficit)
         //   comes as an extra (missing) chunk whenever it reaches a whole chunk.
         Settings st = def; st.nsEnabled = 0; st.hpfEnabled = 0; st.lpfEnabled = 0; st.limiterEnabled = 0;
         constexpr int kSeconds = 360;

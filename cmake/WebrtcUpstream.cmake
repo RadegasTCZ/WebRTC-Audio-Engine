@@ -2,7 +2,7 @@
 # Copyright (C) 2026 RadegasTCZ
 # Builds the parts of upstream WebRTC we use (AEC3, NS, AGC2 + RNN VAD, limiter, AudioBuffer and their
 # dependencies) as one static library `webrtc_apm` from the pinned sources that scripts\Fetch-Upstream.ps1
-# downloads into <workspace>\upstream. File lists follow the owner's AEC3-Echo-Canceller plugin recipe
+# downloads into <workspace>\upstream. File lists follow the companion AEC3-Echo-Canceller plugin recipe
 # (tools/aec3-build/CMakeLists.txt, same revisions); see third_party/UPSTREAM.md.
 
 set(UPSTREAM_DIR "${CMAKE_SOURCE_DIR}/../upstream" CACHE PATH "Pinned upstream sources (scripts/Fetch-Upstream.ps1)")

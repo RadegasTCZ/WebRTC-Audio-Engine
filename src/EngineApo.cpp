@@ -883,7 +883,7 @@ namespace
 bool CEngineApo::IsAecCandidate() const noexcept
 {
     // An AEC APO must be a capture mode effect. Microsoft's AecApo sample only accepts COMMUNICATIONS;
-    // the owner wants AEC for DEFAULT (most apps) and SPEECH too. RAW streams skip mode effects anyway.
+    // this effect also runs AEC for DEFAULT (most apps) and SPEECH. RAW streams skip mode effects anyway.
     return (IsEqualGUID(m_mode, kModeCommunications) || IsEqualGUID(m_mode, kModeDefault) || IsEqualGUID(m_mode, kModeSpeech));
 }
 
@@ -1126,7 +1126,7 @@ float CEngineApo::SliderGainDb(const Settings& s) const noexcept
 {
     if (m_muted.load(std::memory_order_relaxed))
         return VoiceProcessor::kMutedDb;  // silence, also with AGC2 on
-    if (s.agcEnabled)              // AGC2 owns the level: the slider is ignored (owner's request)
+    if (s.agcEnabled)              // AGC2 owns the level: the slider is ignored by design
         return 0.0f;
     // auto: apply the slider unless the microphone has its own volume control, guessed from the bus
     // (USB/Bluetooth devices have one). Windows' QueryHardwareSupport is only logged: the Realtek built-in

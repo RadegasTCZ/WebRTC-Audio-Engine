@@ -8,7 +8,7 @@
   looks for a Realtek HD Audio codec (HDAUDIO\FUNC_01&VEN_10EC); other PCs get the endpoint keys only.
 #>
 param(
-    # Endpoint GUID, e.g. '{6a6941e8-...}' (see HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture).
+    # Endpoint GUID, e.g. '{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}' (see HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture).
     [Parameter(Mandatory)][string]$EndpointId,
     [string]$OutFile,
     [int]$IntervalMs = 150,

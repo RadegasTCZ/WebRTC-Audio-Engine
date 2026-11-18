@@ -5,7 +5,7 @@
   Downloads the pinned upstream sources needed for AEC3 / AGC2 / RNN VAD into
   <workspace>\upstream (outside the repo). Only the needed directories are fetched,
   as gitiles "+archive" tarballs / a GitHub zip. Re-running skips what is present.
-  Revisions match the owner's AEC3-Echo-Canceller plugin (tools/aec3-build).
+  Revisions match the companion AEC3-Echo-Canceller plugin (tools/aec3-build).
   Afterwards the content of each folder is checked against a pinned SHA-256 (over every file's
   path and content, so it does not depend on how the server packs the archive).
 .PARAMETER Root

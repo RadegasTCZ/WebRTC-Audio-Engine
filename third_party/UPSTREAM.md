@@ -8,7 +8,7 @@ This project is GPL-3.0-or-later (see `LICENSE`). Third-party components keep th
 `cmake/WebrtcUpstream.cmake` builds the parts we use into the static library `webrtc_apm`:
 AEC3, NS, AGC2 with the RNN VAD and limiter, AudioBuffer with its splitting filters, and their
 common_audio, rtc_base, api and system_wrappers dependencies.
-The file lists and revisions follow the owner's AEC3-Echo-Canceller plugin (`tools/aec3-build`).
+The file lists and revisions follow the companion AEC3-Echo-Canceller plugin (`tools/aec3-build`).
 
 | Source | Revision | Licence |
 |---|---|---|
@@ -37,7 +37,7 @@ Four small files copied from the AEC3-Echo-Canceller plugin (`tools/aec3-build/s
 - Kept headers: `arch.h`, `os_support.h`, `resample_sse.h`, `resample_neon.h`, `speex/speex_resampler.h`,
   `speex/speexdsp_types.h`, and the `fixed_*.h` / `bfin.h` headers that `arch.h` names in its fixed-point
   branches (never taken here). `COPYING` and `AUTHORS` are verbatim from the upstream root.
-- Taken over from the owner's Noise-suppression-VST v2.1.0 (`ThirdParty/speexdsp`).
+- Taken over from the companion Noise-suppression-VST v2.1.0 (`ThirdParty/speexdsp`).
 
 Local changes (all other files are identical to upstream apart from line endings):
 1. `resample.c` (modified): `#include "speex_config_win.h"` added at the top, and right after it

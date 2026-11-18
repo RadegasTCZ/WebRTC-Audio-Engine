@@ -1,6 +1,6 @@
 # WebRTC Audio Engine
 
-A Windows 11 microphone **effect pack** ("our own Voice Clarity"), built on upstream WebRTC audio processing.
+A Windows 11 microphone **effect pack** (a Voice Clarity-style effect), built on upstream WebRTC audio processing.
 Once installed, choose **WebRTC Audio Engine** under Settings > System > Sound > (microphone) > Audio enhancements.
 
 Processing chain (48 kHz internally, other rates are resampled; the effect always adds exactly 50 ms of latency):
@@ -20,7 +20,7 @@ on this repository's Releases page, will be signed with it. Any other copy, incl
 used at your own risk.
 The effect-pack mechanism uses an undocumented Windows schema, so a Windows update could break it.
 
-WebRTC Audio Engine is an independent project. It is not affiliated with or endorsed by Google, the WebRTC
+WebRTC Audio Engine is an independent project. It is not affiliated with or endorsed by Microsoft, Google, the WebRTC
 project or any other upstream author.
 
 ## Privacy

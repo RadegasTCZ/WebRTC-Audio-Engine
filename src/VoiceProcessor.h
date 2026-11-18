@@ -32,7 +32,7 @@ namespace webrtc { class AudioBuffer; class EchoControl; class NoiseSuppressor; 
 // - Automatic echo timing (streams with a reference): if the echo reaches the mic too early for AEC3,
 //   every input channel is delayed (0..20 ms, crossfaded) in front of the whole chain. EchoTimingTick()
 //   measures and decides on a non-RT thread; see EchoTiming.h.
-// - FIXED LATENCY of 50 ms (owner's choice 2026-11-14): chain (25 ms) + mic delay + output padding always add
+// - FIXED LATENCY of 50 ms (design choice): chain (25 ms) + mic delay + output padding always add
 //   up to kTotalLatency. A mic delay change moves the padding exactly when the shifted audio reaches the end
 //   of the chain, so the output timing never moves and the reported latency is always true.
 // - The echo reference is read through ReferenceSync (rate-locked to the microphone).
