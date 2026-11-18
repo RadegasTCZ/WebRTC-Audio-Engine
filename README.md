@@ -15,6 +15,9 @@ leaks into a headset mic, which per-app echo cancellation (Discord, Teams) does 
 
 **Status:** works on the developer's machines and a few test PCs (Realtek HD Audio, SoundWire, USB mics).
 Current builds are signed with a self-made test certificate, which the installer trusts on the PC it runs on.
+A code-signing certificate from a third-party certificate authority is in progress. Official releases, published
+on this repository's Releases page, will be signed with it. Any other copy, including one you build yourself, is
+used at your own risk.
 The effect-pack mechanism uses an undocumented Windows schema, so a Windows update could break it.
 
 WebRTC Audio Engine is an independent project. It is not affiliated with or endorsed by Google, the WebRTC
