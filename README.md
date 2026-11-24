@@ -4,7 +4,7 @@ A Windows 11 microphone **effect pack** (a Voice Clarity-style effect), built on
 Once installed, choose **WebRTC Audio Engine** under Settings > System > Sound > (microphone) > Audio enhancements.
 
 Processing chain (48 kHz internally, other rates are resampled; the effect always adds exactly 50 ms of latency):
-cleanup filters (rumble 80 Hz high-pass, hiss 10 kHz low-pass) -> **AEC3** echo cancellation (with the speakers'
+cleanup filters (rumble high-pass 60/80/120 Hz, hiss low-pass 10/9/8 kHz, gentle/normal/strong) -> **AEC3** echo cancellation (with the speakers'
 loopback as reference, automatic echo timing and clock-rate tracking) -> **noise suppression** (6/12/18/21 dB)
 -> **AGC2** automatic gain -> -1 dBFS limiter. The mic volume slider is applied in software where the OEM chain
 used to apply it.

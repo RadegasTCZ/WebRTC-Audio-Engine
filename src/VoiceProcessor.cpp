@@ -227,29 +227,56 @@ float VoiceProcessor::InputGain(float sliderDb, bool agcEnabled) noexcept
     return DbToLinear(agcEnabled ? 0.0f : sliderDb);
 }
 
-void VoiceProcessor::Biquad::SetHighPass(float hz, float sampleRate) noexcept
+void VoiceProcessor::Biquad::SetPass2(bool highPass, double hz, double q, double sampleRate) noexcept
 {
-    // RBJ high-pass, Q = 1/sqrt(2) (2nd-order Butterworth): alpha = sin(w0) / (2Q) = sin(w0) / sqrt(2).
+    // RBJ cookbook high/low-pass: alpha = sin(w0) / (2Q).
     const double w0 = 2.0 * std::numbers::pi * hz / sampleRate;
-    const double cosw = std::cos(w0), alpha = std::sin(w0) / std::numbers::sqrt2;
+    const double cosw = std::cos(w0), alpha = std::sin(w0) / (2.0 * q);
     const double a0 = 1.0 + alpha;
-    b0 = static_cast<float>((1.0 + cosw) / 2.0 / a0);
-    b1 = static_cast<float>(-(1.0 + cosw) / a0);
+    const double edge = highPass ? (1.0 + cosw) / 2.0 : (1.0 - cosw) / 2.0;
+    b0 = static_cast<float>(edge / a0);
+    b1 = static_cast<float>((highPass ? -2.0 : 2.0) * edge / a0);
     b2 = b0;
     a1 = static_cast<float>(-2.0 * cosw / a0);
     a2 = static_cast<float>((1.0 - alpha) / a0);
+    z1 = z2 = 0;
 }
 
-void VoiceProcessor::Biquad::SetLowPass(float hz, float sampleRate) noexcept
+void VoiceProcessor::Biquad::SetPass1(bool highPass, double hz, double sampleRate) noexcept
 {
-    // 1st-order low-pass (6 dB/octave), bilinear transform with pre-warping: -3 dB exactly at `hz`.
-    // Deliberately gentle: it only takes the piercing edge off bright laptop mics.
+    // 1st order (6 dB/octave), bilinear transform with pre-warping: -3 dB exactly at `hz`.
     const double k = std::tan(std::numbers::pi * hz / sampleRate);
-    b0 = static_cast<float>(k / (1.0 + k));
-    b1 = b0;
+    b0 = static_cast<float>((highPass ? 1.0 : k) / (1.0 + k));
+    b1 = highPass ? -b0 : b0;
     b2 = 0.0f;
     a1 = static_cast<float>((k - 1.0) / (k + 1.0));
     a2 = 0.0f;
+    z1 = z2 = 0;
+}
+
+void VoiceProcessor::Cascade::Design(bool highPass, float hz, int order, double sampleRate) noexcept
+{
+    // Butterworth: order 1 = one 1st-order section; 2 = one biquad, Q 1/sqrt(2);
+    // 3 = a biquad with Q 1 plus a 1st-order section at the same corner (-3 dB at `hz` overall).
+    if (order <= 1) { s[0].SetPass1(highPass, hz, sampleRate); n = 1; }
+    else if (order == 2) { s[0].SetPass2(highPass, hz, 1.0 / std::numbers::sqrt2, sampleRate); n = 1; }
+    else
+    {
+        s[0].SetPass2(highPass, hz, 1.0, sampleRate);
+        s[1].SetPass1(highPass, hz, sampleRate);
+        n = 2;
+    }
+}
+
+float VoiceProcessor::Cascade::Run(float x) noexcept
+{
+    x = s[0].Run(x);
+    return n > 1 ? s[1].Run(x) : x;
+}
+
+void VoiceProcessor::Cascade::Clear() noexcept
+{
+    for (auto& b : s) b.z1 = b.z2 = 0;
 }
 
 float VoiceProcessor::Biquad::Run(float x) noexcept
@@ -445,7 +472,11 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
 
     m_settings = initial;
     m_level = static_cast<int>(initial.nsLevel);
-    m_hpfHzApplied = m_lpfHzApplied = 0;
+    for (int l = 0; l < settings::kFilterLevels; ++l)
+    {
+        m_hpf[l].Design(true, settings::kRumble[l].hz, settings::kRumble[l].order, kSampleRate);
+        m_lpf[l].Design(false, settings::kHiss[l].hz, settings::kHiss[l].order, kSampleRate);
+    }
     Reset();
 
     if (m_rs)
@@ -473,8 +504,11 @@ void VoiceProcessor::Reset() noexcept
         c.in.fill(0.0f);
         c.out.fill(0.0f);
     }
-    m_hpf.z1 = m_hpf.z2 = 0;
-    m_lpf.z1 = m_lpf.z2 = 0;
+    for (auto& f : m_hpf) f.Clear();
+    for (auto& f : m_lpf) f.Clear();
+    m_hpfLevel = static_cast<int>(m_settings.hpfLevel);
+    m_lpfLevel = static_cast<int>(m_settings.lpfLevel);
+    m_hpfNext = m_lpfNext = -1;
     for (auto& d : m_aecStandIn) d.Clear();
     m_nsDry.Clear();
     if (m_limiter) m_limiter->Reset();
@@ -497,16 +531,10 @@ void VoiceProcessor::Reset() noexcept
 void VoiceProcessor::ApplySettings(const Settings& s) noexcept
 {
     m_settings = s;
-    if (s.hpfHz != m_hpfHzApplied)
-    {
-        m_hpf.SetHighPass(static_cast<float>(s.hpfHz), static_cast<float>(kSampleRate));
-        m_hpfHzApplied = s.hpfHz;
-    }
-    if (s.lpfHz != m_lpfHzApplied)
-    {
-        m_lpf.SetLowPass(static_cast<float>(s.lpfHz), static_cast<float>(kSampleRate));
-        m_lpfHzApplied = s.lpfHz;
-    }
+    if (static_cast<int>(s.hpfLevel) != m_hpfLevel && s.hpfLevel < settings::kFilterLevels)
+        m_hpfNext = static_cast<int>(s.hpfLevel);
+    if (static_cast<int>(s.lpfLevel) != m_lpfLevel && s.lpfLevel < settings::kFilterLevels)
+        m_lpfNext = static_cast<int>(s.lpfLevel);
     m_hpfMix.target = s.hpfEnabled ? 1.0f : 0.0f;
     m_lpfMix.target = s.lpfEnabled ? 1.0f : 0.0f;
     m_nsMix.target = s.nsEnabled ? 1.0f : 0.0f;
@@ -556,14 +584,27 @@ void VoiceProcessor::ProcessBlock() noexcept
         c.dry.Run(c.in.data(), c.delayed.data(), kBlock);  // latency-matched original channel (bypass)
     }
 
-    // 1. Cleanup filters: high-pass ("rumble") then gentle low-pass ("hiss"); both always run and
-    //    are mixed in by their on/off ramps.
-    for (int i = 0; i < kBlock; ++i)
+    // 1. Cleanup filters: high-pass ("rumble") then low-pass ("hiss"). Every level of both always runs (warm
+    //    state), a level change crossfades from the old level's output to the new one over this block, and
+    //    the on/off ramps mix the result in.
     {
-        const float h = m_hpf.Run(m_mono[i]);
-        const float x = m_mono[i] + m_hpfMix.At(i) * (h - m_mono[i]);
-        const float l = m_lpf.Run(x);
-        m_s1[i] = x + m_lpfMix.At(i) * (l - x);
+        const int hFrom = m_hpfLevel, hTo = m_hpfNext >= 0 ? m_hpfNext : hFrom;
+        const int lFrom = m_lpfLevel, lTo = m_lpfNext >= 0 ? m_lpfNext : lFrom;
+        std::array<float, settings::kFilterLevels> h{}, l{};
+        for (int i = 0; i < kBlock; ++i)
+        {
+            const float w = static_cast<float>(i + 1) / kBlock;
+            const float in = m_mono[i];
+            for (int k = 0; k < settings::kFilterLevels; ++k) h[k] = m_hpf[k].Run(in);
+            const float hp = h[hFrom] + w * (h[hTo] - h[hFrom]);
+            const float x = in + m_hpfMix.At(i) * (hp - in);
+            for (int k = 0; k < settings::kFilterLevels; ++k) l[k] = m_lpf[k].Run(x);
+            const float lp = l[lFrom] + w * (l[lTo] - l[lFrom]);
+            m_s1[i] = x + m_lpfMix.At(i) * (lp - x);
+        }
+        m_hpfLevel = hTo;
+        m_lpfLevel = lTo;
+        m_hpfNext = m_lpfNext = -1;
     }
 
     // 2. Echo reference for this block (silence when AEC is off or the loopback ran dry).

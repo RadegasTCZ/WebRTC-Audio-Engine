@@ -324,13 +324,14 @@ namespace
     constexpr std::array<AgcPreset, 3> kAgcPresets{{{8, 20, 3, -60}, {5, 30, 6, -50}, {3, 50, 10, -45}}};
 
     // Controls, in keyboard (Tab) order.
-    enum W { W_DEVICE, W_CUSTOM, W_AEC, W_AEC_LVL, W_AEC_ROOM, W_NS, W_NS_LVL, W_AGC, W_AGC_LVL, W_CLEANUP, W_LIMITER, W_GAIN, W_LINK, W_RESET, W_COUNT };
+    enum W { W_DEVICE, W_CUSTOM, W_AEC, W_AEC_LVL, W_AEC_ROOM, W_NS, W_NS_LVL, W_AGC, W_AGC_LVL, W_RUMBLE, W_RUMBLE_LVL, W_HISS, W_HISS_LVL,
+             W_LIMITER, W_GAIN, W_LINK, W_RESET, W_COUNT };
 
     // Rows of the processing card ("Room size" belongs to echo cancellation and sits right under it).
-    enum Row { R_AEC, R_ROOM, R_NS, R_AGC, R_CLEANUP, R_LIMITER, R_COUNT };
+    enum Row { R_AEC, R_ROOM, R_NS, R_AGC, R_RUMBLE, R_HISS, R_LIMITER, R_COUNT };
 
     // Layout in DIPs (96 dpi), client area kW x kH.
-    constexpr int kW = 440, kH = 600, kPad = 16;
+    constexpr int kW = 440, kH = 644, kPad = 16;
     constexpr int kCardL = 12, kCardR = kW - 12, kRowL = 26, kRowR = kW - 26, kRowH = 44;
     constexpr int kCardA = 104, kCardB = kCardA + R_COUNT * kRowH + 12 + 12;  // processing card, slider card
     constexpr int kSegL = 192, kSegR = 360;                              // choice next to a switch
@@ -339,7 +340,6 @@ namespace
     const std::vector<std::wstring> kStrength{L"Gentle", L"Normal", L"Strong"};
     const std::vector<std::wstring> kRoom{L"Small", L"Medium", L"Large"};
     const std::vector<std::wstring> kNsLevels{L"6 dB", L"12 dB", L"18 dB", L"21 dB"};
-    const std::vector<std::wstring> kCleanup{L"Rumble <80 Hz", L"Hiss >10 kHz"};
     const std::vector<std::wstring> kGainModes{L"Auto", L"Always", L"Never"};
 
     HWND g_wnd = nullptr;
@@ -350,7 +350,7 @@ namespace
     bool g_custom = false;
     Settings g_current{};
     std::wstring g_status = L"Changes apply immediately.";
-    int g_focus = W_DEVICE, g_chip = 0;  // keyboard focus (+ which cleanup chip)
+    int g_focus = W_DEVICE;              // keyboard focus
     bool g_cues = false;                 // show the focus ring (after keyboard use)
     int g_hot = -1;                      // control under the mouse
 
@@ -396,7 +396,10 @@ namespace
         case W_NS_LVL: return SegRect(R_NS);
         case W_AGC: return ui::SwitchRect(RowRect(R_AGC), g_dpi);
         case W_AGC_LVL: return SegRect(R_AGC);
-        case W_CLEANUP: return SegRect(R_CLEANUP, kSegL, kRowR);
+        case W_RUMBLE: return ui::SwitchRect(RowRect(R_RUMBLE), g_dpi);
+        case W_RUMBLE_LVL: return SegRect(R_RUMBLE);
+        case W_HISS: return ui::SwitchRect(RowRect(R_HISS), g_dpi);
+        case W_HISS_LVL: return SegRect(R_HISS);
         case W_LIMITER: return ui::SwitchRect(RowRect(R_LIMITER), g_dpi);
         case W_GAIN: { RECT r = GainRow(); return {S(kSegL), r.top + S(8), r.right, r.bottom - S(8)}; }
         case W_LINK: return Sr(kPad, kH - 74, 200, kH - 42);
@@ -407,7 +410,8 @@ namespace
     // Clicking a row's name also flips its switch.
     bool HitToggleRow(int w, POINT p)
     {
-        const int row = w == W_AEC ? R_AEC : w == W_NS ? R_NS : w == W_AGC ? R_AGC : w == W_LIMITER ? R_LIMITER : -1;
+        const int row = w == W_AEC ? R_AEC : w == W_NS ? R_NS : w == W_AGC ? R_AGC : w == W_RUMBLE ? R_RUMBLE
+                      : w == W_HISS ? R_HISS : w == W_LIMITER ? R_LIMITER : -1;
         if (row < 0) return false;
         RECT r = RowRect(row);
         RECT name{r.left, r.top, w == W_LIMITER ? ControlRect(w).left : S(kSegL - 8), r.bottom};
@@ -423,7 +427,9 @@ namespace
         {
         case W_DEVICE: case W_LINK: return true;
         case W_CUSTOM: return SelectedGuid() != nullptr;
-        case W_AEC: case W_NS: case W_AGC: case W_CLEANUP: case W_LIMITER: case W_RESET: return Editable();
+        case W_AEC: case W_NS: case W_AGC: case W_RUMBLE: case W_HISS: case W_LIMITER: case W_RESET: return Editable();
+        case W_RUMBLE_LVL: return Editable() && s.hpfEnabled;
+        case W_HISS_LVL: return Editable() && s.lpfEnabled;
         case W_AEC_LVL: case W_AEC_ROOM: return Editable() && s.aecEnabled;
         case W_NS_LVL: return Editable() && s.nsEnabled;
         case W_AGC_LVL: return Editable() && s.agcEnabled;
@@ -530,10 +536,10 @@ namespace
                     s.agcHeadroomDb = p.headroom; s.agcMaxGainDb = p.maxGain; s.agcSpeedDbPerSec = p.speed; s.agcNoiseCeilingDbfs = p.noise;
                 });
             break;
-        case W_CLEANUP:
-            if (segment == 0) Change([](Settings& s) { s.hpfEnabled = s.hpfEnabled ? 0u : 1u; });
-            if (segment == 1) Change([](Settings& s) { s.lpfEnabled = s.lpfEnabled ? 0u : 1u; });
-            break;
+        case W_RUMBLE: Change([](Settings& s) { s.hpfEnabled = !s.hpfEnabled; }); break;
+        case W_HISS: Change([](Settings& s) { s.lpfEnabled = !s.lpfEnabled; }); break;
+        case W_RUMBLE_LVL: if (segment >= 0) Change([=](Settings& s) { s.hpfLevel = static_cast<uint32_t>(segment); }); break;
+        case W_HISS_LVL: if (segment >= 0) Change([=](Settings& s) { s.lpfLevel = static_cast<uint32_t>(segment); }); break;
         case W_LINK: ShellExecuteW(g_wnd, L"open", L"ms-settings:sound", nullptr, nullptr, SW_SHOWNORMAL); break;
         case W_RESET:
         {
@@ -559,10 +565,12 @@ namespace
         case W_NS_LVL: return static_cast<int>(s.nsLevel);
         case W_AGC_LVL: return MatchAgcPreset(s);
         case W_GAIN: return static_cast<int>(s.gainMode);
+        case W_RUMBLE_LVL: return static_cast<int>(s.hpfLevel);
+        case W_HISS_LVL: return static_cast<int>(s.lpfLevel);
         }
         return -1;
     }
-    int SegCount(int w) { return w == W_NS_LVL ? 4 : w == W_CLEANUP ? 2 : 3; }
+    int SegCount(int w) { return w == W_NS_LVL ? 4 : 3; }
 
     // ---- painting ----
     void Paint()
@@ -636,8 +644,12 @@ namespace
         rowName(R_AGC, L"Automatic gain");
         ui::DrawSegmented(dc, ControlRect(W_AGC_LVL), kStrength, SegValue(W_AGC_LVL), Enabled(W_AGC_LVL), false, smallFont, t, g_dpi);
         ui::DrawSwitch(dc, ControlRect(W_AGC), s.agcEnabled, edit, t, g_dpi);
-        rowName(R_CLEANUP, L"Cleanup filters");
-        ui::DrawSegmented(dc, ControlRect(W_CLEANUP), kCleanup, (s.hpfEnabled ? 1 : 0) | (s.lpfEnabled ? 2 : 0), edit, true, smallFont, t, g_dpi);
+        rowName(R_RUMBLE, L"Rumble filter");
+        ui::DrawSegmented(dc, ControlRect(W_RUMBLE_LVL), kStrength, SegValue(W_RUMBLE_LVL), Enabled(W_RUMBLE_LVL), false, smallFont, t, g_dpi);
+        ui::DrawSwitch(dc, ControlRect(W_RUMBLE), s.hpfEnabled, edit, t, g_dpi);
+        rowName(R_HISS, L"Hiss filter");
+        ui::DrawSegmented(dc, ControlRect(W_HISS_LVL), kStrength, SegValue(W_HISS_LVL), Enabled(W_HISS_LVL), false, smallFont, t, g_dpi);
+        ui::DrawSwitch(dc, ControlRect(W_HISS), s.lpfEnabled, edit, t, g_dpi);
         rowName(R_LIMITER, L"Limiter", 120);
         {
             SelectObject(dc, smallFont);
@@ -684,12 +696,8 @@ namespace
         if (g_cues && GetFocus() == g_wnd && !ui::ListOpen())
         {
             RECT f = ControlRect(g_focus);
-            if (g_focus == W_CLEANUP)
-            {
-                const int w = f.right - f.left;
-                f = {f.left + w * g_chip / 2, f.top, f.left + w * (g_chip + 1) / 2, f.bottom};
-            }
-            const bool pill = g_focus == W_CUSTOM || g_focus == W_AEC || g_focus == W_NS || g_focus == W_AGC || g_focus == W_LIMITER;
+            const bool pill = g_focus == W_CUSTOM || g_focus == W_AEC || g_focus == W_NS || g_focus == W_AGC || g_focus == W_RUMBLE ||
+                              g_focus == W_HISS || g_focus == W_LIMITER;
             ui::DrawFocus(dc, f, pill ? (f.bottom - f.top) / 2 : S(6), t, g_dpi);
         }
 
@@ -708,7 +716,7 @@ namespace
     int HitTest(POINT p, int* segment)
     {
         *segment = -1;
-        for (int w : {W_DEVICE, W_AEC_LVL, W_AEC_ROOM, W_NS_LVL, W_AGC_LVL, W_CLEANUP, W_GAIN, W_LINK, W_RESET})
+        for (int w : {W_DEVICE, W_AEC_LVL, W_AEC_ROOM, W_NS_LVL, W_AGC_LVL, W_RUMBLE_LVL, W_HISS_LVL, W_GAIN, W_LINK, W_RESET})
         {
             const RECT r = ControlRect(w);
             if (PtInRect(&r, p))
@@ -717,7 +725,7 @@ namespace
                 return w;
             }
         }
-        for (int w : {W_AEC, W_NS, W_AGC, W_LIMITER})
+        for (int w : {W_AEC, W_NS, W_AGC, W_RUMBLE, W_HISS, W_LIMITER})
             if (HitToggleRow(w, p)) return w;
         RECT custom = Sr(300, 34, kW - kPad, 70);
         if (SelectedGuid() && PtInRect(&custom, p)) return W_CUSTOM;
@@ -729,7 +737,7 @@ namespace
         for (int k = 0, w = g_focus; k < W_COUNT; ++k)
         {
             w = (w + dir + W_COUNT) % W_COUNT;
-            if (Enabled(w)) { g_focus = w; g_chip = 0; break; }
+            if (Enabled(w)) { g_focus = w; break; }
         }
         g_cues = true;
         Redraw();
@@ -740,15 +748,15 @@ namespace
         if (ui::ListOpen()) { ui::ListKey(vk); return; }
         if (!Enabled(g_focus)) MoveFocus(+1);
         const bool shift = GetKeyState(VK_SHIFT) < 0;
-        const bool seg = g_focus == W_AEC_LVL || g_focus == W_AEC_ROOM || g_focus == W_NS_LVL || g_focus == W_AGC_LVL || g_focus == W_GAIN;
+        const bool seg = g_focus == W_AEC_LVL || g_focus == W_AEC_ROOM || g_focus == W_NS_LVL || g_focus == W_AGC_LVL ||
+                         g_focus == W_RUMBLE_LVL || g_focus == W_HISS_LVL || g_focus == W_GAIN;
         switch (vk)
         {
         case VK_TAB: MoveFocus(shift ? -1 : +1); return;
         case VK_SPACE:
         case VK_RETURN:
             g_cues = true;
-            if (g_focus == W_CLEANUP) Activate(W_CLEANUP, g_chip);
-            else if (!seg) Activate(g_focus);
+            if (!seg) Activate(g_focus);
             return;
         case VK_LEFT:
         case VK_RIGHT:
@@ -763,7 +771,6 @@ namespace
                 const int next = v < 0 ? (d > 0 ? 0 : SegCount(g_focus) - 1) : v + d;
                 if (next >= 0 && next < SegCount(g_focus)) Activate(g_focus, next);
             }
-            else if (g_focus == W_CLEANUP) { g_chip = d > 0 ? 1 : 0; Redraw(); }
             else if (g_focus == W_DEVICE && (vk == VK_UP || vk == VK_DOWN))
             {
                 if (GetKeyState(VK_MENU) < 0) OpenDeviceList();
@@ -794,7 +801,6 @@ namespace
             if (w >= 0 && Enabled(w))
             {
                 g_focus = w;
-                if (w == W_CLEANUP && segment >= 0) g_chip = segment;
                 Activate(w, segment);
             }
             Redraw();

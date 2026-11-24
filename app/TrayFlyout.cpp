@@ -244,7 +244,15 @@ namespace
             return g_speech ? ui::Dot::Lit : ui::Dot::Hold;
         }
         default:
-            detail = s.hpfEnabled && s.lpfEnabled ? L"Rumble and hiss" : s.hpfEnabled ? L"Rumble (below 80 Hz)" : L"Hiss (above 10 kHz)";
+        {
+            static const wchar_t* const kLevel[] = {L"gentle", L"normal", L"strong"};
+            const wchar_t* rumble = kLevel[std::min<uint32_t>(s.hpfLevel, 2)];
+            const wchar_t* hiss = kLevel[std::min<uint32_t>(s.lpfLevel, 2)];
+            if (s.hpfEnabled && s.lpfEnabled) _snwprintf_s(buf, _TRUNCATE, L"Rumble %s \x00B7 Hiss %s", rumble, hiss);
+            else if (s.hpfEnabled) _snwprintf_s(buf, _TRUNCATE, L"Rumble %s", rumble);
+            else _snwprintf_s(buf, _TRUNCATE, L"Hiss %s", hiss);
+            detail = buf;
+        }
             return ui::Dot::Lit;
         }
     }

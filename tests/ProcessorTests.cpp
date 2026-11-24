@@ -13,6 +13,7 @@
 #include <random>
 #include <vector>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -138,17 +139,58 @@ int main()
         EXPECT(cut > minCut && cut < maxCut, "%.0f Hz attenuation %.1f dB out of range", hz, cut);
     }
 
-    std::printf("[6b] hiss filter (10 kHz, 6 dB/oct): 1 kHz passes, -3 dB at 10 kHz, 18 kHz reduced (NS off)\n");
+    std::printf("[6b] cleanup filter levels match their Butterworth response within 0.3 dB (NS/limiter off)\n");
     {
-        Settings lpOnly = def; lpOnly.nsEnabled = 0; lpOnly.hpfEnabled = 0; lpOnly.lpfEnabled = 1; lpOnly.limiterEnabled = 0;
-        for (auto [hz, lo, hi] : {std::tuple{1000.0f, -0.2, 0.3}, std::tuple{10000.0f, 2.0, 4.0}, std::tuple{18000.0f, 5.0, 99.0}})
-        {
-            auto s = Sine(frames, hz, 0.25f);
-            auto o = Run(s, {480}, lpOnly);
-            const double cut = RmsDb(s, half, s.size()) - RmsDb(o, half, s.size());
-            std::printf("    %5.0f Hz: %.1f dB attenuation\n", hz, cut);
-            EXPECT(cut > lo && cut < hi, "%.0f Hz attenuation %.1f dB out of range", hz, cut);
-        }
+        // Ideal bilinear Butterworth: |H|^2 = 1 / (1 + r^(2n)), r = tan(pi f / fs) / tan(pi fc / fs) (low-pass),
+        // inverted for the high-pass.
+        auto ideal = [](bool highPass, double f, double fc, int order) {
+            double r = std::tan(3.14159265358979 * f / 48000.0) / std::tan(3.14159265358979 * fc / 48000.0);
+            if (highPass) r = 1.0 / r;
+            return 10.0 * std::log10(1.0 + std::pow(r, 2.0 * order));
+        };
+        for (int hp = 0; hp < 2; ++hp)
+            for (int level = 0; level < settings::kFilterLevels; ++level)
+            {
+                const auto& lv = hp ? settings::kRumble[level] : settings::kHiss[level];
+                // Measured against the same chain with both filters off, so only the filter's own response
+                // counts (the band split has a little ripple of its own, and a notch right at 8 kHz).
+                Settings off = def; off.nsEnabled = 0; off.limiterEnabled = 0; off.hpfEnabled = 0; off.lpfEnabled = 0;
+                Settings st = off;
+                st.hpfEnabled = hp ? 1u : 0u; st.lpfEnabled = hp ? 0u : 1u;
+                st.hpfLevel = st.lpfLevel = static_cast<uint32_t>(level);
+                const std::array<float, 3> freqs = hp ? std::array<float, 3>{40.0f, lv.hz, 1000.0f}
+                                                      : std::array<float, 3>{1000.0f, lv.hz == 8000.0f ? 8050.0f : lv.hz, 9700.0f};
+                // (A pure tone at exactly 8 kHz = fs/6 sits on the band-split edge and can't be measured
+                // this way; 50 Hz off it the chain behaves normally.)
+                for (float hz : freqs)
+                {
+                    auto s = Sine(frames, hz, 0.25f);
+                    auto o = Run(s, {480}, st), ref0 = Run(s, {480}, off);
+                    const double cut = RmsDb(ref0, half, s.size()) - RmsDb(o, half, s.size());
+                    const double want = ideal(hp != 0, hz, lv.hz, lv.order);
+                    std::printf("    %s %d (%5.0f Hz, order %d) at %5.0f Hz: %5.1f dB (ideal %5.1f)\n", hp ? "rumble" : "hiss  ",
+                                level, lv.hz, lv.order, hz, cut, want);
+                    EXPECT(std::fabs(cut - want) < 0.3, "%s level %d at %.0f Hz: %.1f dB, ideal %.1f", hp ? "rumble" : "hiss", level, hz, cut, want);
+                }
+            }
+    }
+
+    std::printf("[6c] changing filter levels while a 100 Hz + 9 kHz tone plays stays finite and click-free\n");
+    {
+        auto lo = Sine(frames, 100.0f, 0.2f), hi = Sine(frames, 9000.0f, 0.2f);
+        for (size_t i = 0; i < lo.size(); ++i) lo[i] += hi[i];
+        Settings st = def; st.nsEnabled = 0; st.limiterEnabled = 0;
+        auto o = Run(lo, {441}, st, false, [](int k, Settings& s) {
+            s.hpfLevel = static_cast<uint32_t>((k / 3) % 3);
+            s.lpfLevel = static_cast<uint32_t>((k / 4) % 3);
+        });
+        EXPECT(AllFinite(o), "non-finite output while changing levels");
+        float maxStep = 0;
+        for (size_t i = static_cast<size_t>(kLat + 4800) * kCh + kCh; i < o.size(); i += kCh)
+            maxStep = std::max(maxStep, std::fabs(o[i] - o[i - kCh]));
+        const float clean = 0.2f * 2.0f * 3.14159265f * (100.0f + 9000.0f) / 48000.0f;  // max slope of the clean sum
+        std::printf("    largest sample-to-sample step %.4f (clean signal max %.4f)\n", maxStep, clean);
+        EXPECT(maxStep < 1.5f * clean, "a level change produced a click");
     }
 
     std::printf("[7] live switching (every stage, every level, bypass) stays finite and click-free\n");
@@ -159,7 +201,8 @@ int main()
         s.nsEnabled = (k / 11) % 2;
         s.nsLevel = (k / 13) % 4;
         s.bypass = (k / 17) % 2;
-        s.hpfHz = 60 + 20 * ((k / 19) % 3);
+        s.hpfLevel = static_cast<uint32_t>((k / 19) % 3);
+        s.lpfLevel = static_cast<uint32_t>((k / 23) % 3);
     });
     EXPECT(AllFinite(sw), "non-finite output while switching");
     float maxStep = 0;

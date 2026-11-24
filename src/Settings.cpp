@@ -115,7 +115,6 @@ namespace
         };
         read(L"Bypass", s.bypass);
         read(L"HpfEnabled", s.hpfEnabled);   // older key; CleanupFilters below wins when present
-        read(L"HpfHz", s.hpfHz);
         uint32_t cleanup = 0xFFFFFFFFu;
         read(L"CleanupFilters", cleanup);
         if (cleanup <= 3)
@@ -123,7 +122,8 @@ namespace
             s.hpfEnabled = (cleanup & 1u) ? 1u : 0u;
             s.lpfEnabled = (cleanup & 2u) ? 1u : 0u;
         }
-        read(L"LpfHz", s.lpfHz);
+        read(L"RumbleLevel", s.hpfLevel);
+        read(L"HissLevel", s.lpfLevel);
         read(L"NsEnabled", s.nsEnabled);
         read(L"NsLevel", s.nsLevel);
         read(L"GainMode", s.gainMode);
@@ -147,8 +147,8 @@ namespace
         s.agcEnabled = s.agcEnabled ? 1u : 0u;
         s.limiterEnabled = s.limiterEnabled ? 1u : 0u;
         s.aecEnabled = s.aecEnabled ? 1u : 0u;
-        s.hpfHz = std::clamp<uint32_t>(s.hpfHz, 20, 300);
-        s.lpfHz = std::clamp<uint32_t>(s.lpfHz, 8000, 16000);
+        if (s.hpfLevel >= settings::kFilterLevels) s.hpfLevel = 1;
+        if (s.lpfLevel >= settings::kFilterLevels) s.lpfLevel = 0;
         if (s.nsLevel > 3) s.nsLevel = 1;
         if (s.gainMode > 2) s.gainMode = 0;
         if (s.aecStrength > 2) s.aecStrength = 1;
@@ -162,8 +162,8 @@ namespace
 
     void Log(const wchar_t* who, const Settings& s) noexcept
     {
-        apolog::Write(L"[settings %s] bypass=%u lpf=%u@%uHz hpf=%u@%uHz ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u aec=%u strength=%u room=%u",
-                      who, s.bypass, s.lpfEnabled, s.lpfHz, s.hpfEnabled, s.hpfHz, s.nsEnabled, s.nsLevel, s.gainMode, s.agcEnabled,
+        apolog::Write(L"[settings %s] bypass=%u rumble=%u/%u hiss=%u/%u ns=%u level=%u gainMode=%u agc=%u(%d/%d/%d/%d) limiter=%u aec=%u strength=%u room=%u",
+                      who, s.bypass, s.hpfEnabled, s.hpfLevel, s.lpfEnabled, s.lpfLevel, s.nsEnabled, s.nsLevel, s.gainMode, s.agcEnabled,
                       s.agcHeadroomDb, s.agcMaxGainDb, s.agcSpeedDbPerSec, s.agcNoiseCeilingDbfs, s.limiterEnabled, s.aecEnabled,
                       s.aecStrength, s.aecRoom);
     }
@@ -290,8 +290,8 @@ LONG Settings::WriteToRegistry(const Settings& s, const wchar_t* device) noexcep
     put(L"Bypass", s.bypass);
     put(L"CleanupFilters", (s.hpfEnabled ? 1u : 0u) | (s.lpfEnabled ? 2u : 0u));
     put(L"HpfEnabled", s.hpfEnabled);
-    put(L"HpfHz", s.hpfHz);
-    put(L"LpfHz", s.lpfHz);
+    put(L"RumbleLevel", s.hpfLevel);
+    put(L"HissLevel", s.lpfLevel);
     put(L"NsEnabled", s.nsEnabled);
     put(L"NsLevel", s.nsLevel);
     put(L"GainMode", s.gainMode);

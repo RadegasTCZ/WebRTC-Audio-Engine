@@ -12,10 +12,12 @@ struct Settings
 {
     uint32_t bypass = 0;        // 1 = whole chain bypassed (latency kept constant)
     // Cleanup filters (registry "CleanupFilters": 0 = off, 1 = rumble, 2 = hiss, 3 = both [default]), first in the chain.
-    uint32_t hpfEnabled = 1;    // "rumble": high-pass, 2nd-order Butterworth
-    uint32_t hpfHz = 80;        // 20..300
-    uint32_t lpfEnabled = 1;    // "hiss": gentle 1st-order low-pass, 6 dB/octave (takes the edge off bright mics)
-    uint32_t lpfHz = 10000;     // 8000..16000
+    // Each has three levels (registry "RumbleLevel" / "HissLevel", see settings::kRumble / kHiss). The level is
+    // kept while a filter is off, so switching it back on returns to the same level.
+    uint32_t hpfEnabled = 1;    // "rumble": high-pass
+    uint32_t hpfLevel = 1;      // 0 = gentle, 1 = normal [default], 2 = strong
+    uint32_t lpfEnabled = 1;    // "hiss": low-pass
+    uint32_t lpfLevel = 0;      // 0 = gentle [default], 1 = normal, 2 = strong
     uint32_t nsEnabled = 1;     // WebRTC noise suppression
     uint32_t nsLevel = 1;       // 0 = 6 dB, 1 = 12 dB, 2 = 18 dB, 3 = 21 dB
     uint32_t gainMode = 0;      // mic volume slider in software (effect pack only):
@@ -47,6 +49,12 @@ struct Settings
 namespace settings
 {
     inline constexpr wchar_t kRegistryPath[] = L"SOFTWARE\\WebrtcVoiceApo";
+
+    // Cleanup filter levels: Butterworth, corner = -3 dB point, order 1/2/3 = 6/12/18 dB per octave.
+    struct FilterLevel { float hz; int order; };
+    inline constexpr int kFilterLevels = 3;
+    inline constexpr FilterLevel kRumble[kFilterLevels]{{60.0f, 2}, {80.0f, 2}, {120.0f, 3}};     // high-pass
+    inline constexpr FilterLevel kHiss[kFilterLevels]{{10000.0f, 1}, {9000.0f, 2}, {8000.0f, 3}};  // low-pass
 
     // Starts the registry watcher once per process (idempotent, non-RT callers only).
     void EnsureWatcher() noexcept;

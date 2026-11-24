@@ -18,7 +18,7 @@ namespace webrtc { class AudioBuffer; class EchoControl; class NoiseSuppressor; 
 // Real-time voice processing core, independent of COM/APO plumbing (unit-testable).
 //
 // 48 kHz, 10 ms blocks, voice path in MONO (like the AEC3 plugin), WebRTC APM order:
-//   input (N ch) -> input gain -> downmix -> HPF -> band split ->
+//   input (N ch) -> input gain -> downmix -> cleanup filters (rumble high-pass, hiss low-pass) -> band split ->
 //   [NS analyse (pre-AEC)] -> AEC3 (echo reference from the render loopback) -> NS process ->
 //   band merge -> AGC2 -> limiter -> every channel
 // - Every stage always runs; switching a stage on/off crossfades (one block) against a latency-matched
@@ -156,9 +156,17 @@ private:
     struct Biquad
     {
         float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
-        void SetHighPass(float hz, float sampleRate) noexcept;
-        void SetLowPass(float hz, float sampleRate) noexcept;
+        void SetPass2(bool highPass, double hz, double q, double sampleRate) noexcept;  // RBJ, 12 dB/oct
+        void SetPass1(bool highPass, double hz, double sampleRate) noexcept;            // 6 dB/oct
         float Run(float x) noexcept;
+    };
+    struct Cascade  // Butterworth of order 1..3 from at most two sections
+    {
+        std::array<Biquad, 2> s{};
+        int n = 1;
+        void Design(bool highPass, float hz, int order, double sampleRate) noexcept;
+        float Run(float x) noexcept;
+        void Clear() noexcept;
     };
     struct Ramp
     {
@@ -238,7 +246,9 @@ private:
     std::vector<Channel> m_ch;
 
     // Mono voice path.
-    Biquad m_hpf, m_lpf;
+    // Cleanup filters: every level runs all the time (cheap), so a level change is a one-block crossfade.
+    std::array<Cascade, settings::kFilterLevels> m_hpf, m_lpf;
+    int m_hpfLevel = 1, m_hpfNext = -1, m_lpfLevel = 0, m_lpfNext = -1;
     std::unique_ptr<webrtc::AudioBuffer> m_cap, m_render;
     std::array<std::unique_ptr<webrtc::AudioBuffer>, kNsLevels> m_nsBuf;
     std::array<std::unique_ptr<webrtc::NoiseSuppressor>, kNsLevels> m_ns;
@@ -260,7 +270,6 @@ private:
     std::unique_ptr<OutputLimiter> m_limiter;
 
     Settings m_settings{};
-    uint32_t m_hpfHzApplied = 0, m_lpfHzApplied = 0;
     int m_level = 1, m_nextLevel = -1;
     Ramp m_hpfMix, m_lpfMix, m_nsMix, m_agcMix, m_limMix, m_wet;
     float m_gainTargetDb = 0.0f;

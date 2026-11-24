@@ -538,9 +538,9 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
                     catch (...) { apolog::Write(L"[%s #%ld] diagnostics: out of memory, no recording", SlotName(), m_instanceId); }
                 }
             }
-            apolog::Write(L"[%s #%ld] NS %s: bypass=%u hpf=%u@%uHz ns=%u level=%u channels=%u rate=%.0f%s maxFrames=%u latency=%d frames",
+            apolog::Write(L"[%s #%ld] NS %s: bypass=%u rumble=%u/%u hiss=%u/%u ns=%u level=%u channels=%u rate=%.0f%s maxFrames=%u latency=%d frames",
                           SlotName(), m_instanceId, ok ? L"ACTIVE" : L"off (unsupported format)", s.bypass, s.hpfEnabled,
-                          s.hpfHz, s.nsEnabled, s.nsLevel, m_channels, fmt.fFramesPerSecond,
+                          s.hpfLevel, s.lpfEnabled, s.lpfLevel, s.nsEnabled, s.nsLevel, m_channels, fmt.fFramesPerSecond,
                           ok && m_proc.SampleRate() != VoiceProcessor::kSampleRate ? L" (resampled via 48 kHz)" : L"",
                           maxFrames, ok ? m_proc.LatencyFrames() : 0);
         }
