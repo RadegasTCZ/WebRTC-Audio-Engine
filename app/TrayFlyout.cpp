@@ -153,6 +153,12 @@ namespace
     telemetry::Values g_live{};
     bool g_speech = false;          // with ~300 ms hold, so the dots don't flicker on every syllable
     ULONGLONG g_speechAt = 0, g_alertUntil = 0;
+    // Sound is playing but (almost) no echo is being removed, e.g. a headset: shown once it lasts a few seconds
+    // (AEC3 needs a moment to converge), cleared as soon as it removes a clear amount again.
+    bool g_noEcho = false;
+    ULONGLONG g_lowEchoSince = 0;
+    constexpr float kNoEchoDb = 2.0f, kEchoAgainDb = 3.0f;
+    constexpr ULONGLONG kNoEchoMs = 5000;
 
     float Sane(float v, float lo, float hi) { return std::isfinite(v) ? std::clamp(v, lo, hi) : lo; }
 
@@ -171,6 +177,15 @@ namespace
         if (g_recording && Sane(g_live.speech, 0.0f, 1.0f) >= 0.5f) { g_speech = true; g_speechAt = now; }
         else if (now - g_speechAt > 300) g_speech = false;
         if (g_recording && Sane(g_live.limiterDb, 0.0f, 99.0f) > 1.0f) g_alertUntil = now + 300;
+
+        const bool playing = g_recording && g_live.aecRunning && g_live.referenceDbfs >= -70.0f;
+        const float removed = Sane(g_live.echoRemovedDb, 0.0f, 99.0f);
+        if (!playing || removed >= kEchoAgainDb) { g_noEcho = false; g_lowEchoSince = 0; }
+        else if (removed < kNoEchoDb)
+        {
+            if (!g_lowEchoSince) g_lowEchoSince = now;
+            if (now - g_lowEchoSince >= kNoEchoMs) g_noEcho = true;
+        }
     }
 
     // ---------------------------------------------------------------- layout + drawing
@@ -223,6 +238,7 @@ namespace
         case ROW_AEC:
             if (!g_live.aecRunning) { detail = L"No speaker reference for this recording"; return ui::Dot::Hold; }
             if (!(g_live.referenceDbfs >= -70.0f)) { detail = L"Waiting: nothing playing"; return ui::Dot::Hold; }
+            if (g_noEcho) { detail = L"Sound playing \x00B7 no echo picked up"; return ui::Dot::Lit; }
             _snwprintf_s(buf, _TRUNCATE, L"Removing echo \x00B7 %.0f dB", Sane(g_live.echoRemovedDb, 0.0f, 99.0f));
             detail = buf;
             return ui::Dot::Lit;
@@ -400,7 +416,8 @@ namespace
         if (i < 0 || i >= static_cast<int>(g_mics.size())) return;
         g_micGuid = g_mics[static_cast<size_t>(i)].guid;
         ReloadSettings();
-        g_speech = false;
+        g_speech = g_noEcho = false;
+        g_lowEchoSince = 0;
         ReadLive();
         InvalidateRect(g_flyout, nullptr, FALSE);
     }
