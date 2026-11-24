@@ -1,7 +1,8 @@
 WebRTC Audio Engine - third-party notices
 =========================================
 
-WebRTC Audio Engine is free software under the GNU General Public License v3 or later (see LICENSE).
+WebRTC Audio Engine, Copyright (C) 2026 Radek Boruta (RadegasTCZ), is free software under the
+GNU General Public License v3 or later (see LICENSE).
 Its binaries also contain the third-party code listed below. Each component keeps its own licence;
 the full texts follow.
 

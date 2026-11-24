@@ -1,5 +1,7 @@
 # WebRTC Audio Engine
 
+Author and maintainer: Radek Boruta ([RadegasTCZ](https://github.com/RadegasTCZ))
+
 A Windows 11 microphone **effect pack** (a Voice Clarity-style effect), built on upstream WebRTC audio processing.
 Once installed, choose **WebRTC Audio Engine** under Settings > System > Sound > (microphone) > Audio enhancements.
 
@@ -98,7 +100,7 @@ running). It is the only "Installed apps" entry: removing it removes the drivers
 certificate trust it added (settings are kept). An upgrade removes the old version first. Requires Windows 11 x64.
 
 ## Licence
-GPL-3.0-or-later (see `LICENSE`). The binaries also contain WebRTC (BSD-3-Clause + patent grant), Abseil
+Copyright (C) 2026 Radek Boruta (RadegasTCZ). GPL-3.0-or-later (see `LICENSE`). The binaries also contain WebRTC (BSD-3-Clause + patent grant), Abseil
 (Apache-2.0), RNNoise (BSD-3-Clause), PFFFT (BSD-style) and the SpeexDSP resampler (BSD-3-Clause); their full
 licence texts are in `THIRD-PARTY-NOTICES.txt`, and `third_party/UPSTREAM.md` lists the exact revisions and
 local changes.
