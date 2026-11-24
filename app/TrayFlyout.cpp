@@ -186,6 +186,8 @@ namespace
             if (!g_lowEchoSince) g_lowEchoSince = now;
             if (now - g_lowEchoSince >= kNoEchoMs) g_noEcho = true;
         }
+        else if (!g_noEcho)
+            g_lowEchoSince = 0;   // 2-3 dB: the 5 s must be continuous below 2 dB
     }
 
     // ---------------------------------------------------------------- layout + drawing

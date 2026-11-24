@@ -506,8 +506,9 @@ void VoiceProcessor::Reset() noexcept
     }
     for (auto& f : m_hpf) f.Clear();
     for (auto& f : m_lpf) f.Clear();
-    m_hpfLevel = static_cast<int>(m_settings.hpfLevel);
-    m_lpfLevel = static_cast<int>(m_settings.lpfLevel);
+    // Used as array indices on the audio thread: never trust a value that bypassed Sanitised().
+    m_hpfLevel = m_settings.hpfLevel < settings::kFilterLevels ? static_cast<int>(m_settings.hpfLevel) : 1;
+    m_lpfLevel = m_settings.lpfLevel < settings::kFilterLevels ? static_cast<int>(m_settings.lpfLevel) : 0;
     m_hpfNext = m_lpfNext = -1;
     for (auto& d : m_aecStandIn) d.Clear();
     m_nsDry.Clear();
@@ -531,10 +532,11 @@ void VoiceProcessor::Reset() noexcept
 void VoiceProcessor::ApplySettings(const Settings& s) noexcept
 {
     m_settings = s;
-    if (static_cast<int>(s.hpfLevel) != m_hpfLevel && s.hpfLevel < settings::kFilterLevels)
-        m_hpfNext = static_cast<int>(s.hpfLevel);
-    if (static_cast<int>(s.lpfLevel) != m_lpfLevel && s.lpfLevel < settings::kFilterLevels)
-        m_lpfNext = static_cast<int>(s.lpfLevel);
+    // Pending level changes always follow the latest settings (back to the current level = no change).
+    if (s.hpfLevel < settings::kFilterLevels)
+        m_hpfNext = static_cast<int>(s.hpfLevel) != m_hpfLevel ? static_cast<int>(s.hpfLevel) : -1;
+    if (s.lpfLevel < settings::kFilterLevels)
+        m_lpfNext = static_cast<int>(s.lpfLevel) != m_lpfLevel ? static_cast<int>(s.lpfLevel) : -1;
     m_hpfMix.target = s.hpfEnabled ? 1.0f : 0.0f;
     m_lpfMix.target = s.lpfEnabled ? 1.0f : 0.0f;
     m_nsMix.target = s.nsEnabled ? 1.0f : 0.0f;
