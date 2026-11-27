@@ -16,10 +16,17 @@ are untouched. Because the echo reference is everything the PC plays, it also re
 leaks into a headset mic, which per-app echo cancellation (Discord, Teams) does not.
 
 **Status:** works on the developer's machines and a few test PCs (Realtek HD Audio, SoundWire, USB mics).
-Current builds are signed with a self-made test certificate, which the installer trusts on the PC it runs on.
-A code-signing certificate from a third-party certificate authority is in progress. Official releases, published
-on this repository's Releases page, will be signed with it. Any other copy, including one you build yourself, is
-used at your own risk.
+Official releases, published on this repository's Releases page, are signed with a Certum open-source
+code-signing certificate ("Open Source Developer Radek Boruta", issued by Certum Code Signing 2021 CA) and
+timestamped. Any other copy, including one you build yourself, is used at your own risk.
+
+**What the installer changes on your PC's trust settings:** the driver packages are signed by the author, not by
+Microsoft. Windows installs such packages silently only if their publisher is trusted, so the MSI adds the
+certificate it ships with (public part only) to the computer's **Trusted Publishers** store. It is not added to
+the trusted root authorities: Certum's root is already trusted by Windows. While it is there, Windows installs
+any driver package signed with this certificate without asking. Uninstalling removes the trust again (if the
+installer was the one that added it). To check: `certlm.msc` > Trusted Publishers > Certificates.
+
 The effect-pack mechanism uses an undocumented Windows schema, so a Windows update could break it.
 
 WebRTC Audio Engine is an independent project. It is not affiliated with or endorsed by Microsoft, Google, the WebRTC
@@ -95,8 +102,8 @@ dotnet tool install --global wix --version 7.0.1   # once (.NET SDK needed); the
 ```
 The MSI copies the signed packages to Program Files\WebrtcAudioEngine\Driver, together with `LICENSE.txt` and
 `THIRD-PARTY-NOTICES.txt`. Its custom action trusts the bundled certificate (TrustedPublisher, plus Root if
-self-made), installs the packages and restarts Windows Audio (a repair of the same version leaves Windows Audio
-running). It is the only "Installed apps" entry: removing it removes the drivers, the settings app and any
+self-made, as in builds made with these scripts), installs the packages and restarts Windows Audio (a repair of
+the same version leaves Windows Audio running). It is the only "Installed apps" entry: removing it removes the drivers, the settings app and any
 certificate trust it added (settings are kept). An upgrade removes the old version first. Requires Windows 11 x64.
 
 ## Licence
