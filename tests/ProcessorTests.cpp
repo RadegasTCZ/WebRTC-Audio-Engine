@@ -1042,6 +1042,25 @@ int main()
         EXPECT(peakTarget <= ReferenceSync::kStartCap + 960, "target rose to %.1f ms after the pause", peakTarget / 48.0);
         EXPECT(std::fabs(sync.BacklogSamples() - sync.TargetSamples()) <= 480, "backlog %.1f ms vs target %.1f ms",
                sync.BacklogSamples() / 48.0, sync.TargetSamples() / 48.0);
+
+        // The reference shift survives re-settles, also when the first write after a pause carries two packets
+        // (seen live: the 20 ms write lifted the floor and only 4.8 of a 14 ms shift was left).
+        ReferenceRing ring2;
+        ring2.Init(48000);
+        ReferenceSync shifted;
+        shifted.SetInitialShift(14 * 48);
+        for (int b = 0; b < 20 * 100; ++b)
+        {
+            const int64_t now = static_cast<int64_t>(b + 1) * 480;
+            const bool capturePaused = b >= 1000 && b < 1300;
+            if (b == 1300) ring2.Write(chunk.data(), 480, now - 240);   // two packets in one go on resume
+            ring2.Write(chunk.data(), 480, now);
+            if (!capturePaused) shifted.Pull(ring2, out.data(), 480, now, 48000);
+        }
+        std::printf("    with a 14 ms shift: moved %.1f ms after the pause, target %.1f ms, backlog %.1f ms\n", shifted.ShiftSamples() / 48.0,
+                    shifted.TargetSamples() / 48.0, shifted.BacklogSamples() / 48.0);
+        EXPECT(shifted.ShiftSamples() == 14 * 48, "shift %.1f ms after the pause, expected 14", shifted.ShiftSamples() / 48.0);
+        EXPECT(shifted.CaptureGaps() == 1, "%llu capture pauses", static_cast<unsigned long long>(shifted.CaptureGaps()));
     }
 
     {

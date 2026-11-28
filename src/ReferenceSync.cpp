@@ -162,7 +162,10 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
     if (stamped)
     {
         // Largest write seen between two of our reads (an over-estimate when writes bunch up: that is safe).
-        if (m_lastStampW != 0 && written > m_lastStampW)
+        // Not in the first half of a settle: right after a (re)start the speakers' side often delivers two
+        // packets at once, which would lift the floor for good and undo the reference shift (2026-11-28).
+        const bool learn = m_state == State::Running || m_settleBlocks >= kSettleBlocks / 2;
+        if (learn && m_lastStampW != 0 && written > m_lastStampW)
         {
             m_maxChunk = std::max(m_maxChunk, static_cast<int>(std::min<size_t>(written - m_lastStampW, kMaxTarget)));
             if (m_maxChunk > m_peakChunk.load(std::memory_order_relaxed)) m_peakChunk.store(m_maxChunk, std::memory_order_relaxed);
@@ -196,15 +199,25 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
                 const size_t avail = ring.Available();
                 ring.TrimTo(avail - std::min(avail, static_cast<size_t>(backlog - m_target)));
             }
-            else if (backlog < m_target - n)
+            else if (backlog < m_target - 48)
                 m_refilling = true;   // fill up to the target before reading on
             m_fillEma = m_target;
         }
     }
     else if (m_refilling)
     {
-        if (backlog >= m_target - n / 2 || stalled)
+        if (backlog >= m_target || stalled)
+        {
+            // The reference comes in whole packets, so the fill overshoots: trim back to the exact target, so
+            // every re-settle puts the echo at the same place (it used to stop up to 5 ms short).
             m_refilling = false;
+            if (!stalled && backlog > m_target)
+            {
+                const size_t avail = ring.Available();
+                ring.TrimTo(avail - std::min(avail, static_cast<size_t>(backlog - m_target)));
+            }
+            m_fillEma = m_target;
+        }
         else
             return silence();   // still filling up to the target (consume nothing)
     }
