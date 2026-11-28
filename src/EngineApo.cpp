@@ -69,7 +69,7 @@ namespace
 
 namespace
 {
-    constexpr wchar_t kTimingKey[] = L"Software\\WebrtcAudioEngine\\EchoTiming2";   // 2: values from before ReferenceSync are stale
+    constexpr wchar_t kTimingKey[] = L"Software\\WebrtcAudioEngine\\EchoTiming3";   // 3: values from before the fixed reference target (2026-11-28) are stale
     struct RememberedDelay { wchar_t device[64]; int samples; double ratePpm; };
     SRWLOCK g_rememberedLock = SRWLOCK_INIT;
     RememberedDelay g_remembered[32] = {};
@@ -495,6 +495,7 @@ STDMETHODIMP CEngineApo::LockForProcess(UINT32 u32NumInputConnections, APO_CONNE
             m_proc.SetEchoTimingSetup(autoTiming != 0, remembered, rememberedRate);
             m_timingMeasured = m_timingValid = m_timingOutOfRange = m_timingChanges = 0;
             m_timingAgreedLogged = false;
+            m_timingCapped = false;
             m_timingLast = {};
             // Per-device meters for the tray app (non-RT). Claim again if another device took our slot meanwhile.
             m_telemetryKey = telemetry::KeyOf(m_endpointKey);
@@ -564,12 +565,16 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
     if (timing)
     {
         const int delay = m_proc.MicDelaySamples();
-        if (m_timingAgreedLogged)
-            RememberDelay(m_deviceGuid, delay, m_proc.Sync().RatePpm());   // also a 0: never keep a stale delay
+        // Not a delay pinned at the 25 ms cap: the echo was out of reach, so the value is wrong (2026-11-28:
+        // a broken stream's 25 ms carried into the next streams). Also a 0: never keep a stale delay.
+        const bool keep = m_timingAgreedLogged && !m_timingCapped;
+        if (keep)
+            RememberDelay(m_deviceGuid, delay, m_proc.Sync().RatePpm());
         apolog::Write(L"[%s #%ld] echo timing: %d measurements (%d clear, %d out of range), %d change(s), mic delay %.1f ms%s, "
                       L"last: echo %+.2f ms vs reference as AEC3 sees it, quality %.0f", SlotName(), m_instanceId, m_timingMeasured,
                       m_timingValid, m_timingOutOfRange, m_timingChanges, delay / 48.0,
-                      m_timingAgreedLogged ? L" (remembered for the next stream)" : L" (no agreed timing this stream)",
+                      keep ? L" (remembered for the next stream)"
+                           : m_timingAgreedLogged ? L" (CAPPED: not remembered)" : L" (no agreed timing this stream)",
                       m_timingLast.offsetMs, m_timingLast.quality);
     }
     if (m_refActive.load())
@@ -622,9 +627,10 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
                 apolog::Write(L"[%s #%ld] %s per 10 s from %02d:%02d:%s", SlotName(), m_instanceId, title, start / 6, (start % 6) * 10, line);
             }
         };
-        apolog::Write(L"[%s #%ld] reference sync: holds a backlog of %.1f ms, rate correction now %+.1f ppm, %llu resync(s), "
-                      L"%llu block(s) without reference", SlotName(), m_instanceId, m_lastTarget / 48.0, m_proc.Sync().RatioPpm(),
-                      m_proc.Sync().Resyncs(), m_proc.ReferenceUnderruns());
+        apolog::Write(L"[%s #%ld] reference sync: backlog target %.1f ms, rate correction now %+.1f ppm, %llu resync(s), "
+                      L"%llu block(s) without reference, %llu capture pause(s), largest reference write %.1f ms", SlotName(),
+                      m_instanceId, m_lastTarget / 48.0, m_proc.Sync().RatioPpm(), m_proc.Sync().Resyncs(), m_proc.ReferenceUnderruns(),
+                      m_proc.Sync().CaptureGaps(), m_proc.Sync().PeakChunkSamples() / 48.0);
         timeline(L"reference backlog ms", [&](int i, wchar_t (&v)[24]) { _snwprintf_s(v, _TRUNCATE, L"%.1f", m_queueAvgSteps[i] / 48.0); });
         timeline(L"reference sync ppm", [&](int i, wchar_t (&v)[24]) { _snwprintf_s(v, _TRUNCATE, L"%+.1f", m_queueMinSteps[i] / 10.0); });
         timeline(L"reference resyncs/blocks without reference", [&](int i, wchar_t (&v)[24]) {
@@ -725,20 +731,24 @@ void CEngineApo::OnTimingTick() noexcept
             apolog::Write(L"[%s #%ld] echo timing: clear echo at %+.1f ms, outside the range we act on (quality %.0f)", SlotName(),
                           m_instanceId, ev.result.offsetMs, ev.result.quality);
     }
+    if (ev.decision.agreedNow)
+        m_timingCapped = ev.decision.capped;
     if (ev.decision.change)
     {
         ++m_timingChanges;
         apolog::Write(L"[%s #%ld] echo timing: echo %+.2f ms vs reference (quality %.0f) -> mic delayed %.1f ms%s", SlotName(),
                       m_instanceId, ev.decision.rawOffsetMs, ev.result.quality, ev.decision.delaySamples / 48.0,
                       ev.decision.capped ? L" (CAPPED at the 25 ms maximum)" : L"");
-        RememberDelay(m_deviceGuid, ev.decision.delaySamples, ev.ratePpm);
+        if (!ev.decision.capped)
+            RememberDelay(m_deviceGuid, ev.decision.delaySamples, ev.ratePpm);
         m_timingAgreedLogged = true;
     }
     if (ev.rateChanged)
     {
         apolog::Write(L"[%s #%ld] echo timing: echo slides %+.2f ms per minute (%+.1f ppm) -> reference rate %+.1f ppm", SlotName(),
                       m_instanceId, ev.slidePpm * 0.06, ev.slidePpm, ev.ratePpm);
-        RememberDelay(m_deviceGuid, ev.delaySamples, ev.ratePpm);
+        if (!m_timingCapped)
+            RememberDelay(m_deviceGuid, ev.delaySamples, ev.ratePpm);
     }
     if (!ev.decision.change && ev.agreed && !m_timingAgreedLogged)
     {

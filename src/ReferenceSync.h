@@ -20,10 +20,13 @@
 // phases) at a rate set from outside (SetRatePpm: the echo-slide estimate, remembered per microphone).
 // With the right rate the echo holds still and the extra packets merely top the queue up: the backlog is
 // allowed to saw by a packet. The queue itself is only a guard:
-// - Backlog target = what the stream starts with (second half of the first 0.5 s, after trimming to 40 ms
-//   as before), at least one write chunk + one block + the look-ahead + 5 ms.
-// - |backlog - target| > 25 ms (a stall, a burst, or a wrong rate with no echo to correct it): resync at once.
-// - An isolated dry block raises the target by one block; 5+ in a row are a stall (relearn on return).
+// - Backlog target = 40 ms, at least one write chunk + one block + the look-ahead + 5 ms (the chunk learnt
+//   from consecutive reads after each (re)start). The backlog is trimmed or filled to it once settled, so
+//   every start lands at the same place (2026-11-28: it used to keep whatever it started with).
+// - |backlog - target| > 25 ms (a stall, a burst, or a wrong rate with no echo to correct it): resync at once
+//   (too little: wait until the target is reached again).
+// - An isolated dry block raises the target by one block (at most 20 ms per settle); 5+ in a row are a
+//   stall (relearn on return). A capture pause (> 50 ms between our reads) drops the queued reference.
 // Real-time safe: no allocation, no locks.
 class ReferenceSync
 {
@@ -54,6 +57,8 @@ public:
     bool Locked() const noexcept { return m_state == State::Running; }
     uint64_t Resyncs() const noexcept { return m_resyncs; }
     uint64_t DryBlocks() const noexcept { return m_dry; }
+    uint64_t CaptureGaps() const noexcept { return m_captureGaps; }   // capture pauses (stale reference dropped)
+    int PeakChunkSamples() const noexcept { return m_peakChunk; }     // largest reference write seen this stream
 
 private:
     enum class State { Waiting, Settling, Running };
@@ -77,5 +82,10 @@ private:
     std::atomic<uint64_t> m_resyncs{0}, m_dry{0};  // RT writes, the timer thread reads
     int m_dryRun = 0;          // consecutive blocks without reference while running
     size_t m_lastStampW = 0;   // to learn the reference write size (chunk)
-    int m_maxChunk = 0;
+    int m_maxChunk = 0;        // largest write between two consecutive reads, since the last (re)start
+    int64_t m_lastPullTicks = 0;
+    int m_settledTarget = kStartCap;   // the target set at the last settle (dry bumps are limited from it)
+    bool m_refilling = false;  // below the target: output silence until it is reached
+    std::atomic<uint64_t> m_captureGaps{0};
+    std::atomic<int> m_peakChunk{0};
 };

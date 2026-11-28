@@ -95,6 +95,7 @@ public:
         int delaySamples = 0;      // the new delay (when change)
         float rawOffsetMs = 0.0f;  // echo vs reference without our delay (the agreed value)
         bool capped = false;       // the delay needed was more than kMaxDelayMs
+        bool agreedNow = false;    // this result completed an agreement (rawOffsetMs / capped are valid)
     };
 
     void Reset(int currentDelaySamples) noexcept;

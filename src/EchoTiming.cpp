@@ -233,6 +233,7 @@ EchoTimingController::Decision EchoTimingController::OnResult(const EchoTimingRe
     m_agreed = true;
     m_lastRaw = agreed;
     d.rawOffsetMs = agreed;
+    d.agreedNow = true;
     float neededMs = std::max(0.0f, kMarginMs - agreed);
     if (neededMs > kMaxDelayMs)
     {

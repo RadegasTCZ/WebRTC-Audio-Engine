@@ -12,6 +12,8 @@ namespace
     constexpr int kSettleBlocks = 50;           // 0.5 s to learn the natural backlog
     constexpr double kEma = 1.0 / 200.0;        // backlog smoothing for the meters (2 s)
     constexpr double kStallSeconds = 0.1;       // no reference write for this long: the speakers' stream stalled
+    constexpr double kCaptureGapSeconds = 0.05; // more than this between two of our reads: capture was paused
+    constexpr int kMaxDryBump = 2 * 480;        // isolated dry blocks may raise the target by at most 20 ms per settle
 
     double BesselI0(double x)
     {
@@ -66,6 +68,11 @@ void ReferenceSync::Reset() noexcept
     m_dryRun = 0;
     m_lastStampW = 0;
     m_maxChunk = 0;
+    m_lastPullTicks = 0;
+    m_settledTarget = kStartCap;
+    m_refilling = false;
+    m_captureGaps = 0;
+    m_peakChunk = 0;
 }
 
 double ReferenceSync::Backlog(const ReferenceRing& ring, int64_t nowTicks, int64_t freq) const noexcept
@@ -93,6 +100,11 @@ void ReferenceSync::Restart(ReferenceRing& ring) noexcept
     m_state = State::Settling;
     m_settleBlocks = 0;
     m_settleSum = 0.0;
+    m_refilling = false;
+    // Relearn the write size from consecutive reads of this run only (2026-11-28: a value learnt across a
+    // capture pause was kept forever and lifted the next target to 100 ms).
+    m_lastStampW = 0;
+    m_maxChunk = 0;
 }
 
 bool ReferenceSync::Fill(ReferenceRing& ring, size_t upTo) noexcept
@@ -111,6 +123,23 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
         ++m_dry;
         return false;
     };
+    if (nowTicks != 0 && freq > 0)
+    {
+        // Capture paused (the engine stopped calling us) while the speakers may have kept writing: what is
+        // queued is stale and the write-size estimate would see the whole pause as one chunk. Start over.
+        const bool gap = m_lastPullTicks != 0 &&
+                         static_cast<double>(nowTicks - m_lastPullTicks) / static_cast<double>(freq) > kCaptureGapSeconds;
+        m_lastPullTicks = nowTicks;
+        if (gap)
+        {
+            ++m_captureGaps;
+            ring.Reset();
+            m_state = State::Waiting;
+            m_dryRun = 0;
+            m_lastStampW = 0;
+            m_maxChunk = 0;
+        }
+    }
     if (m_state == State::Waiting)
     {
         if (ring.Available() < static_cast<size_t>(n))
@@ -128,7 +157,10 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
     {
         // Largest write seen between two of our reads (an over-estimate when writes bunch up: that is safe).
         if (m_lastStampW != 0 && written > m_lastStampW)
+        {
             m_maxChunk = std::max(m_maxChunk, static_cast<int>(std::min<size_t>(written - m_lastStampW, kMaxTarget)));
+            if (m_maxChunk > m_peakChunk.load(std::memory_order_relaxed)) m_peakChunk.store(m_maxChunk, std::memory_order_relaxed);
+        }
         m_lastStampW = written;
     }
     if (m_state == State::Settling)
@@ -137,13 +169,33 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
         if (++m_settleBlocks > kSettleBlocks / 2) m_settleSum += backlog;
         if (m_settleBlocks >= kSettleBlocks)
         {
-            int target = static_cast<int>(std::lround(m_settleSum / (kSettleBlocks - kSettleBlocks / 2)));
-            if (stamped)   // the stamped backlog counts reference not yet delivered: keep a whole chunk + a block spare
+            // A fixed target (2026-11-28): every (re)start lands on the same backlog, so the echo sits at the same
+            // place against the reference and a remembered mic delay stays valid. 40 ms (the old start bound),
+            // more if the writes are large: the stamped backlog counts reference not yet delivered, so keep a
+            // whole chunk + a block + the look-ahead + 5 ms spare.
+            int target = kStartCap;
+            if (stamped)
                 target = std::max(target, m_maxChunk + n + kHalf + kRate / 200);
-            m_target = std::clamp(target, kMinTarget, kMaxTarget);
-            m_fillEma = m_target;
+            else   // no clock (tests, old hosts): keep what the stream naturally holds, as before
+                target = static_cast<int>(std::lround(m_settleSum / (kSettleBlocks - kSettleBlocks / 2)));
+            m_target = m_settledTarget = std::clamp(target, kMinTarget, kMaxTarget);
             m_state = State::Running;
+            if (backlog > m_target)
+            {
+                const size_t avail = ring.Available();
+                ring.TrimTo(avail - std::min(avail, static_cast<size_t>(backlog - m_target)));
+            }
+            else if (backlog < m_target - n)
+                m_refilling = true;   // fill up to the target before reading on
+            m_fillEma = m_target;
         }
+    }
+    else if (m_refilling)
+    {
+        if (backlog >= m_target - n / 2 || stalled)
+            m_refilling = false;
+        else
+            return silence();   // still filling up to the target (consume nothing)
     }
     else if (!stalled)
     {
@@ -159,7 +211,8 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
         else if (backlog < m_target - kResyncSamples)
         {
             ++m_resyncs;
-            return silence();   // the reference fell far behind: wait for it (consume nothing)
+            m_refilling = true;
+            return silence();   // the reference fell far behind: wait for it up to the target (consume nothing)
         }
         else
             m_fillEma += kEma * (backlog - m_fillEma);   // inside the band: the rate alone decides (no chasing)
@@ -177,17 +230,19 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
     const size_t last = static_cast<size_t>(m_pos + (n - 1) * ratio) + kHalf;
     if (!Fill(ring, last + 1))
     {
-        // Ran dry. Once: the backlog was too small for the delivery jitter, allow one block more from now on.
-        // Several blocks in a row: the speakers' stream stalled; start over when it comes back.
-        if (m_dryRun++ == 0 && m_state == State::Running)
-            m_target = std::min(m_target + 480, kMaxTarget);
-        else if (m_dryRun >= 5)
+        // Ran dry. Several blocks in a row: the speakers' stream stalled; start over when it comes back.
+        if (++m_dryRun >= 5)
         {
             m_state = State::Waiting;
             m_dryRun = 0;
         }
         return silence();
     }
+    // Back after 1-4 dry blocks: a delivery hiccup, so the backlog was too small for the jitter; allow one
+    // block more from now on. (Counted on recovery, not at the first dry block: a stall that starts there
+    // must not raise the target - 2026-11-28, seen as 50 ms targets after idle speakers.)
+    if (m_dryRun > 0 && m_state == State::Running)
+        m_target = std::min({m_target + 480, m_settledTarget + kMaxDryBump, kMaxTarget});
     m_dryRun = 0;
 
     for (int i = 0; i < n; ++i)

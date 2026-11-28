@@ -1012,6 +1012,36 @@ int main()
         }
     }
 
+    {
+        std::printf("reference sync: capture pause, then idle speakers (2026-11-28 regression)\n");
+        // Clocked like the real APO (48000 ticks per second). The reference keeps arriving while capture is
+        // paused for 2 s; later the speakers go idle for 1 s. The old code learnt the whole pause as one
+        // "write chunk" and the next re-settle put the target at 100 ms (backlog stuck near 80 ms).
+        ReferenceRing ring;
+        ring.Init(48000);
+        ReferenceSync sync;
+        std::vector<float> chunk(480, 0.1f), out(480);
+        int64_t peakTarget = 0, idleTarget = 0;
+        for (int b = 0; b < 30 * 100; ++b)
+        {
+            const int64_t now = static_cast<int64_t>(b + 1) * 480;
+            const bool capturePaused = b >= 1000 && b < 1200;   // 10..12 s
+            const bool speakersIdle = b >= 1500 && b < 1600;    // 15..16 s
+            if (!speakersIdle) ring.Write(chunk.data(), 480, now);
+            if (!capturePaused) sync.Pull(ring, out.data(), 480, now, 48000);
+            if (b > 1700) peakTarget = std::max<int64_t>(peakTarget, sync.TargetSamples());
+            if (speakersIdle) idleTarget = std::max<int64_t>(idleTarget, sync.TargetSamples());
+        }
+        std::printf("    target %.1f ms (peak after recovery %.1f), backlog %.1f ms, %llu capture pause(s), largest write %.1f ms\n",
+                    sync.TargetSamples() / 48.0, peakTarget / 48.0, sync.BacklogSamples() / 48.0,
+                    static_cast<unsigned long long>(sync.CaptureGaps()), sync.PeakChunkSamples() / 48.0);
+        EXPECT(idleTarget <= ReferenceSync::kStartCap, "idle speakers raised the target to %.1f ms", idleTarget / 48.0);
+        EXPECT(sync.CaptureGaps() == 1, "%llu capture pauses seen, expected 1", static_cast<unsigned long long>(sync.CaptureGaps()));
+        EXPECT(peakTarget <= ReferenceSync::kStartCap + 960, "target rose to %.1f ms after the pause", peakTarget / 48.0);
+        EXPECT(std::fabs(sync.BacklogSamples() - sync.TargetSamples()) <= 480, "backlog %.1f ms vs target %.1f ms",
+               sync.BacklogSamples() / 48.0, sync.TargetSamples() / 48.0);
+    }
+
     std::printf(g_failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -151,6 +151,7 @@ private:
     // Touched only by the timer callback; read after StopTimingTimer.
     int m_timingMeasured = 0, m_timingValid = 0, m_timingOutOfRange = 0, m_timingChanges = 0;
     bool m_timingAgreedLogged = false;
+    bool m_timingCapped = false;   // the last agreed timing needed more than the 25 ms cap (not remembered)
     EchoTimingResult m_timingLast{};
     std::atomic<int> m_latencyLogged{0};  // GetLatency calls logged this stream (any thread)
     HNSTIME m_latencyLastLogged = -1;

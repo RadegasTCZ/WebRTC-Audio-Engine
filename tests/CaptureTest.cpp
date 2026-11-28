@@ -7,6 +7,9 @@
 //   comms    : AudioCategory_Communications, no RAW   (Teams/Discord style)
 //   raw      : AUDCLNT_STREAMOPTIONS_RAW              (bypasses SFX/MFX)
 //   rawcomms : Communications + RAW                   (Chrome/Edge WebRTC style)
+//   ...pause : add "pause" to any mode (e.g. commspause): the stream stops for 3 s every 8 s and starts
+//              again without being closed, like an app pausing its mic (tests the echo reference
+//              handling across capture pauses while playback keeps running).
 #include <windows.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -50,7 +53,8 @@ int wmain(int argc, wchar_t** argv)
     const int seconds = argc > 2 ? _wtoi(argv[2]) : 3;
     const bool comms = wcsstr(modeArg, L"comms") != nullptr;
     const bool raw = wcsstr(modeArg, L"raw") != nullptr;
-    std::printf("CaptureTest: category=%s raw=%d seconds=%d\n", comms ? "Communications" : "Other", raw, seconds);
+    const bool pause = wcsstr(modeArg, L"pause") != nullptr;
+    std::printf("CaptureTest: category=%s raw=%d seconds=%d pause=%d\n", comms ? "Communications" : "Other", raw, seconds, pause);
 
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IMMDeviceEnumerator* en = nullptr;
@@ -131,9 +135,19 @@ int wmain(int argc, wchar_t** argv)
 
     // Mix format in shared mode is float32 on all current Windows versions.
     float peak = 0.0f; double sumSq = 0.0; UINT64 samples = 0; UINT64 frames = 0; UINT32 silentPackets = 0;
-    const ULONGLONG end = GetTickCount64() + static_cast<ULONGLONG>(seconds) * 1000;
+    const ULONGLONG start = GetTickCount64(), end = start + static_cast<ULONGLONG>(seconds) * 1000;
+    ULONGLONG nextPause = start + 8000;
     while (GetTickCount64() < end)
     {
+        if (pause && GetTickCount64() >= nextPause && GetTickCount64() + 3000 < end)
+        {
+            client->Stop();
+            std::printf("  %5.1f s: paused (Stop)\n", (GetTickCount64() - start) / 1000.0);
+            Sleep(3000);
+            client->Start();
+            std::printf("  %5.1f s: resumed (Start)\n", (GetTickCount64() - start) / 1000.0);
+            nextPause = GetTickCount64() + 8000;
+        }
         Sleep(10);
         UINT32 n = 0;
         while (SUCCEEDED(cap->GetNextPacketSize(&n)) && n > 0)
