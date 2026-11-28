@@ -177,9 +177,13 @@ namespace
         if (g_recording && Sane(g_live.speech, 0.0f, 1.0f) >= 0.5f) { g_speech = true; g_speechAt = now; }
         else if (now - g_speechAt > 300) g_speech = false;
         if (g_recording && Sane(g_live.limiterDb, 0.0f, 99.0f) > 1.0f) g_alertUntil = now + 300;
-        // Echo timing out of order (2026-11-28): the reference queue far above its normal ~40 ms (the bug that
-        // pinned it near 80 ms), or an echo too early to line up. Held 2 s so a single meter does not flicker.
-        if (g_recording && g_live.aecRunning && (Sane(g_live.refBacklogMs, 0.0f, 999.0f) > 60.0f || g_live.timingCapped))
+        // Echo timing out of order (2026-11-28), held 2 s so a single meter does not flicker:
+        // - the target itself inflated (normal: 40 ms or less, + at most 20 ms of jitter bumps; the bug took it to 100),
+        // - the queue well above its target (a resync acts at +25 ms, so +20 ms is not normal),
+        // - an echo too early to line up.
+        const float target = Sane(g_live.refTargetMs, 0.0f, 999.0f);
+        if (g_recording && g_live.aecRunning &&
+            (target > 60.0f || Sane(g_live.refBacklogMs, 0.0f, 999.0f) > target + 20.0f || g_live.timingCapped))
             g_syncAlertUntil = now + 2000;
 
         const bool playing = g_recording && g_live.aecRunning && g_live.referenceDbfs >= -70.0f;

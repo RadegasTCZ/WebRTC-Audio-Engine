@@ -12,7 +12,8 @@ namespace
     constexpr int kSettleBlocks = 50;           // 0.5 s to learn the natural backlog
     constexpr double kEma = 1.0 / 200.0;        // backlog smoothing for the meters (2 s)
     constexpr double kStallSeconds = 0.1;       // no reference write for this long: the speakers' stream stalled
-    constexpr double kCaptureGapSeconds = 0.05; // more than this between two of our reads: capture was paused
+    constexpr double kReadGapSeconds = 0.05;    // more than this between two of our reads: do not learn the write size
+    constexpr double kCaptureGapSeconds = 0.25; // more than this: capture was paused (a scheduling stall is shorter)
     constexpr int kMaxDryBump = 2 * 480;        // isolated dry blocks may raise the target by at most 20 ms per settle
 
     double BesselI0(double x)
@@ -127,16 +128,21 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
     auto silence = [&] {
         std::fill(out, out + n, 0.0f);
         ++m_dry;
+        // Not running normally: no room to move the reference (the controller must not ask on stale slack).
+        m_shiftPub.store(m_shiftApplied, std::memory_order_relaxed);
+        m_slackPub.store(0, std::memory_order_relaxed);
         return false;
     };
     if (nowTicks != 0 && freq > 0)
     {
-        // Capture paused (the engine stopped calling us) while the speakers may have kept writing: what is
-        // queued is stale and the write-size estimate would see the whole pause as one chunk. Start over.
-        const bool gap = m_lastPullTicks != 0 &&
-                         static_cast<double>(nowTicks - m_lastPullTicks) / static_cast<double>(freq) > kCaptureGapSeconds;
+        const double sincePull = m_lastPullTicks != 0 ? static_cast<double>(nowTicks - m_lastPullTicks) / static_cast<double>(freq) : 0.0;
         m_lastPullTicks = nowTicks;
-        if (gap)
+        // A late read (a scheduling stall): the writes since the last read are not one chunk, do not learn from them.
+        if (sincePull > kReadGapSeconds)
+            m_lastStampW = 0;
+        // Capture paused (the engine stopped calling us) while the speakers may have kept writing: what is
+        // queued is stale. Start over. (A short stall is left to the resync below: its reference is not stale.)
+        if (sincePull > kCaptureGapSeconds)
         {
             ++m_captureGaps;
             ring.Reset();
@@ -183,22 +189,29 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
             // more if the writes are large: the stamped backlog counts reference not yet delivered, so keep a
             // whole chunk + a block + the look-ahead + 5 ms spare.
             int base = kStartCap;
-            m_floor = std::clamp((stamped ? m_maxChunk : 0) + n + kHalf + kRate / 200, kMinTarget, kMaxTarget);
+            // The floor is learnt once per stream (the first settle): a later settle may catch one doubled write
+            // in its short window, which would move the floor, and the echo with it, by a packet (2026-11-28).
+            // Real extra jitter is handled by the dry-block bump.
+            if (m_floor == 0)
+                m_floor = std::clamp((stamped ? m_maxChunk : 0) + n + kHalf + kRate / 200, kMinTarget, kMaxTarget);
             if (stamped)
                 base = std::max(base, m_floor);
             else   // no clock (tests, old hosts): keep what the stream naturally holds, as before
                 base = static_cast<int>(std::lround(m_settleSum / (kSettleBlocks - kSettleBlocks / 2)));
             base = std::clamp(base, kMinTarget, kMaxTarget);
             // The reference shift asked for so far (this stream or remembered) applies from the start.
-            const int target = std::max(std::min(m_floor, base), base - m_shiftReq.load(std::memory_order_relaxed));
+            int req = m_shiftReq.load(std::memory_order_relaxed);
+            const int target = std::max(std::min(m_floor, base), base - req);
             m_shiftApplied = base - target;
+            // A request beyond what fits is dropped (it would otherwise eat the jitter bumps later). A request
+            // the timer adds meanwhile makes the exchange fail and is kept.
+            while (req > m_shiftApplied && !m_shiftReq.compare_exchange_weak(req, m_shiftApplied, std::memory_order_relaxed))
+            {
+            }
             m_target = m_settledTarget = target;
             m_state = State::Running;
             if (backlog > m_target)
-            {
-                const size_t avail = ring.Available();
-                ring.TrimTo(avail - std::min(avail, static_cast<size_t>(backlog - m_target)));
-            }
+                ring.Drop(static_cast<size_t>(backlog - m_target));
             else if (backlog < m_target - 48)
                 m_refilling = true;   // fill up to the target before reading on
             m_fillEma = m_target;
@@ -212,10 +225,7 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
             // every re-settle puts the echo at the same place (it used to stop up to 5 ms short).
             m_refilling = false;
             if (!stalled && backlog > m_target)
-            {
-                const size_t avail = ring.Available();
-                ring.TrimTo(avail - std::min(avail, static_cast<size_t>(backlog - m_target)));
-            }
+                ring.Drop(static_cast<size_t>(backlog - m_target));
             m_fillEma = m_target;
         }
         else
@@ -223,14 +233,15 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
     }
     else if (!stalled)
     {
+        // Room to move: from the settled target (never the headroom a dry-block bump added) and from what is
+        // really queued (the backlog may sit below the target inside the band), down to the floor.
         const int want = m_shiftReq.load(std::memory_order_relaxed) - m_shiftApplied;
-        const int move = std::min(want, m_target - m_floor);
+        const int move = std::min({want, m_settledTarget - m_floor, static_cast<int>(backlog) - m_floor});
         if (move > 0)
         {
             // Move the reference: drop `move` samples once (the reference is not heard, so no click; AEC3
             // sees one delay step and re-aligns).
-            const size_t avail = ring.Available();
-            ring.TrimTo(avail - std::min(avail, static_cast<size_t>(move)));
+            ring.Drop(static_cast<size_t>(move));
             m_target -= move;
             m_settledTarget -= move;
             m_fillEma -= move;
@@ -240,9 +251,8 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
         else if (backlog > m_target + kResyncSamples)
         {
             // A burst or a capture stall: drop straight back to the target instead of slewing for minutes.
-            const size_t avail = ring.Available();
-            const size_t drop = std::min(avail, static_cast<size_t>(backlog - m_target));
-            ring.TrimTo(avail - drop);
+            const size_t drop = std::min(ring.Available(), static_cast<size_t>(backlog - m_target));
+            ring.Drop(drop);
             m_fillEma = backlog - static_cast<double>(drop);
             ++m_resyncs;
         }
@@ -257,7 +267,12 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
     }
     m_ratioPpm = (ratio - 1.0) * 1e6;
     m_shiftPub.store(m_shiftApplied, std::memory_order_relaxed);
-    m_slackPub.store(m_state == State::Running ? std::max(0, m_target - m_floor) : 0, std::memory_order_relaxed);
+    {
+        // Room the controller may still ask for: as in the move above, minus what is asked but not yet applied.
+        const int pending = std::max(0, m_shiftReq.load(std::memory_order_relaxed) - m_shiftApplied);
+        const int room = std::min(m_settledTarget - m_floor, static_cast<int>(backlog) - m_floor) - pending;
+        m_slackPub.store(m_state == State::Running && !stalled && !m_refilling ? std::max(0, room) : 0, std::memory_order_relaxed);
+    }
 
     // Make room (keep kHalf - 1 samples of history before the read position).
     if (m_pos > 2048.0)

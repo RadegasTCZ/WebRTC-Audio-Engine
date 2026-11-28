@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 RadegasTCZ
 #pragma once
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -70,6 +71,13 @@ public:
         for (size_t i = 0; i < n; ++i) dst[i] = m_buf[(r + i) % m_buf.size()];
         m_r.store(r + n, std::memory_order_release);
         return true;
+    }
+    // Consumer side: drop exactly n of the queued samples (fewer if not that many). Relative to the read
+    // position, so a write landing meanwhile is kept (TrimTo(Available() - n) would drop it too).
+    void Drop(size_t n) noexcept
+    {
+        const size_t r = m_r.load(std::memory_order_relaxed), w = m_w.load(std::memory_order_acquire);
+        m_r.store(r + std::min(n, w - r), std::memory_order_release);
     }
     // Consumer side: drop samples so that at most `keep` remain (bounds the reference delay).
     void TrimTo(size_t keep) noexcept

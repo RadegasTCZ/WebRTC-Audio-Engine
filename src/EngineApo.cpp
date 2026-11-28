@@ -583,7 +583,7 @@ STDMETHODIMP CEngineApo::UnlockForProcess()
         // a broken stream's 25 ms carried into the next streams). Also a 0: never keep a stale delay.
         const bool keep = m_timingAgreedLogged && !m_timingCapped;
         if (keep)
-            RememberDelay(m_deviceGuid, delay, m_proc.Sync().RatePpm(), m_proc.Sync().RequestedShiftSamples());
+            RememberDelay(m_deviceGuid, delay, m_proc.Sync().RatePpm(), m_proc.Sync().ShiftSamples());   // the shift really applied
         apolog::Write(L"[%s #%ld] echo timing: %d measurements (%d clear, %d out of range), %d change(s), mic delay %.1f ms%s, "
                       L"last: echo %+.2f ms vs reference as AEC3 sees it, quality %.0f", SlotName(), m_instanceId, m_timingMeasured,
                       m_timingValid, m_timingOutOfRange, m_timingChanges, delay / 48.0,
@@ -770,8 +770,9 @@ void CEngineApo::OnTimingTick() noexcept
     if (!ev.decision.change && ev.agreed && !m_timingAgreedLogged)
     {
         m_timingAgreedLogged = true;
-        apolog::Write(L"[%s #%ld] echo timing: echo %+.2f ms vs reference (quality %.0f) -> mic delay %.1f ms is right, no change",
-                      SlotName(), m_instanceId, ev.decision.rawOffsetMs, ev.result.quality, ev.delaySamples / 48.0);
+        apolog::Write(L"[%s #%ld] echo timing: echo %+.2f ms vs reference (quality %.0f) -> mic delay %.1f ms %s", SlotName(),
+                      m_instanceId, ev.decision.rawOffsetMs, ev.result.quality, ev.delaySamples / 48.0,
+                      ev.decision.capped ? L"stays (CAPPED: the echo is out of reach)" : L"is right, no change");
     }
 }
 

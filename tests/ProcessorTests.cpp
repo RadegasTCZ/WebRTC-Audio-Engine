@@ -1061,6 +1061,45 @@ int main()
                     shifted.TargetSamples() / 48.0, shifted.BacklogSamples() / 48.0);
         EXPECT(shifted.ShiftSamples() == 14 * 48, "shift %.1f ms after the pause, expected 14", shifted.ShiftSamples() / 48.0);
         EXPECT(shifted.CaptureGaps() == 1, "%llu capture pauses", static_cast<unsigned long long>(shifted.CaptureGaps()));
+
+        // Review 2026-11-28: a 60 ms scheduling stall (capture called late, then catching up) is not a pause:
+        // the queued reference belongs to the delayed mic audio and must be kept.
+        {
+            ReferenceRing r3;
+            r3.Init(48000);
+            ReferenceSync st;
+            int64_t clock = 0;
+            for (int b = 0; b < 10 * 100; ++b)
+            {
+                clock += 480;
+                r3.Write(chunk.data(), 480, clock);
+                if (b == 500) { for (int k = 0; k < 6; ++k) { clock += 480; r3.Write(chunk.data(), 480, clock); } }  // 60 ms late
+                st.Pull(r3, out.data(), 480, clock, 48000);
+                if (b == 500) for (int k = 0; k < 6; ++k) st.Pull(r3, out.data(), 480, clock, 48000);   // catching up
+            }
+            std::printf("    60 ms stall: %llu capture pause(s), %llu dry block(s), target %.1f ms\n", static_cast<unsigned long long>(st.CaptureGaps()),
+                        static_cast<unsigned long long>(st.DryBlocks()), st.TargetSamples() / 48.0);
+            EXPECT(st.CaptureGaps() == 0, "a 60 ms stall counted as a capture pause");
+        }
+        // Review 2026-11-28: a remembered shift larger than fits must not eat the jitter bump of a later hiccup.
+        {
+            ReferenceRing r4;
+            r4.Init(48000);
+            ReferenceSync st;
+            st.SetInitialShift(30 * 48);   // more than 40 ms - floor allows
+            int64_t clock = 0;
+            for (int b = 0; b < 10 * 100; ++b)
+            {
+                clock += 480;
+                if (b < 400 || b > 402) r4.Write(chunk.data(), 480, clock);   // a three-packet hiccup...
+                if (b == 403) for (int k = 0; k < 3; ++k) r4.Write(chunk.data(), 480, clock);   // ...made up late
+                st.Pull(r4, out.data(), 480, clock, 48000);
+            }
+            std::printf("    remembered 30 ms shift: applied %.1f ms, requested now %.1f ms, target %.1f ms, slack %.1f ms\n",
+                        st.ShiftSamples() / 48.0, st.RequestedShiftSamples() / 48.0, st.TargetSamples() / 48.0, st.SlackSamples() / 48.0);
+            EXPECT(st.RequestedShiftSamples() == st.ShiftSamples(), "an impossible shift request stayed pending");
+            EXPECT(st.TargetSamples() > 40 * 48 - st.ShiftSamples(), "the jitter bump was trimmed away (target %.1f ms)", st.TargetSamples() / 48.0);
+        }
     }
 
     {
