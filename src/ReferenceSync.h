@@ -58,6 +58,16 @@ public:
     uint64_t Resyncs() const noexcept { return m_resyncs; }
     uint64_t DryBlocks() const noexcept { return m_dry; }
     uint64_t CaptureGaps() const noexcept { return m_captureGaps; }   // capture pauses (stale reference dropped)
+
+    // Moving the reference in time (2026-11-28). When the echo comes before the reference, the backlog can be
+    // shortened instead of (or before) delaying the microphone: the controller asks for a total shift and the
+    // real-time side trims the queue in one step, never below the jitter floor. The shift survives re-settles.
+    void SetInitialShift(int samples) noexcept { m_shiftReq.store(std::max(0, samples), std::memory_order_relaxed); }   // after Reset
+    void RequestShift(int extraSamples) noexcept { m_shiftReq.fetch_add(std::max(0, extraSamples), std::memory_order_relaxed); }
+    int RequestedShiftSamples() const noexcept { return m_shiftReq.load(std::memory_order_relaxed); }
+    int ShiftSamples() const noexcept { return m_shiftPub.load(std::memory_order_relaxed); }   // applied
+    int SlackSamples() const noexcept { return m_slackPub.load(std::memory_order_relaxed); }   // how much more it can move now
+    uint64_t Shifts() const noexcept { return m_shifts.load(std::memory_order_relaxed); }
     int PeakChunkSamples() const noexcept { return m_peakChunk; }     // largest reference write seen this stream
 
 private:
@@ -88,4 +98,8 @@ private:
     bool m_refilling = false;  // below the target: output silence until it is reached
     std::atomic<uint64_t> m_captureGaps{0};
     std::atomic<int> m_peakChunk{0};
+    int m_floor = 0;           // smallest safe target (write chunk + block + look-ahead + 5 ms), set at settle
+    int m_shiftApplied = 0;    // RT: how far the target sits below its natural value
+    std::atomic<int> m_shiftReq{0}, m_shiftPub{0}, m_slackPub{0};
+    std::atomic<uint64_t> m_shifts{0};
 };

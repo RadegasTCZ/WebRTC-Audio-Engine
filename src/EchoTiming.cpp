@@ -204,7 +204,7 @@ void EchoTimingController::Reset(int currentDelaySamples) noexcept
     m_lastRaw = 0.0f;
 }
 
-EchoTimingController::Decision EchoTimingController::OnResult(const EchoTimingResult& r) noexcept
+EchoTimingController::Decision EchoTimingController::OnResult(const EchoTimingResult& r, int refSlackSamples) noexcept
 {
     Decision d;
     d.delaySamples = m_delay;
@@ -235,14 +235,23 @@ EchoTimingController::Decision EchoTimingController::OnResult(const EchoTimingRe
     d.rawOffsetMs = agreed;
     d.agreedNow = true;
     float neededMs = std::max(0.0f, kMarginMs - agreed);
+    // Raw is measured after the reference path, so a reference shift simply shows as a higher raw next time.
+    // Shift whole ms only, and only when it is worth a change (same hysteresis as the delay).
+    const float slackMs = static_cast<float>(std::max(0, refSlackSamples)) / 48.0f;
+    float shiftMs = std::floor(std::min(neededMs, slackMs));
+    if (shiftMs < kChangeMs)
+        shiftMs = 0.0f;
+    neededMs -= shiftMs;
     if (neededMs > kMaxDelayMs)
     {
         neededMs = kMaxDelayMs;
         d.capped = true;
     }
     const int needed = static_cast<int>(std::lround(neededMs * 48.0f));
-    if (std::abs(needed - m_delay) < static_cast<int>(kChangeMs * 48.0f))
+    const int shift = static_cast<int>(shiftMs) * 48;
+    if (shift == 0 && std::abs(needed - m_delay) < static_cast<int>(kChangeMs * 48.0f))
         return d;
+    d.refShiftSamples = shift;
 
     m_delay = needed;
     m_settle = kSettleTicks;

@@ -749,7 +749,7 @@ int main()
 
     std::printf("[18] automatic echo timing: an echo that comes too early is lined up, everything else is left alone\n");
     {
-        struct TimingRun { std::vector<float> y; int delay = 0; int changes = 0; int latency = 0; int latencyStart = 0; };
+        struct TimingRun { std::vector<float> y; int delay = 0; int shift = 0; int changes = 0; int latency = 0; int latencyStart = 0; };
         // Runs with a tick every 100 blocks (1 s), like the effect's timer.
         auto runTiming = [&](const std::vector<float>& mic, const std::vector<float>& farEnd, Settings st, bool automatic,
                              int initial = 0, bool withRef = true) {
@@ -771,6 +771,7 @@ int main()
                 if (k % 100 == 99 && vp.EchoTimingTick().decision.change) ++r.changes;
             }
             r.delay = vp.MicDelaySamples();
+            r.shift = vp.Sync().ShiftSamples();
             r.latency = vp.LatencyFrames();
             return r;
         };
@@ -802,9 +803,10 @@ int main()
             auto aecOff = st; aecOff.aecEnabled = 0;
             auto raw = runTiming(mic, farEnd, aecOff, false);
             const double echo = RmsDb(raw.y, e0, e1), withAuto = RmsDb(on.y, e0, e1), without = RmsDb(off.y, e0, e1);
-            std::printf("    echo -4 ms: mic delay %.1f ms (%d change), latency %d -> %d; echo removed %.1f dB with vs %.1f dB without\n",
-                        on.delay / 48.0, on.changes, on.latencyStart, on.latency, echo - withAuto, echo - without);
-            EXPECT(on.delay >= 12 * 48 - 48 && on.delay <= 12 * 48 + 48, "delay %.2f ms, expected ~12", on.delay / 48.0);
+            std::printf("    echo -4 ms: mic delay %.1f ms + reference moved %.1f ms (%d change), latency %d -> %d; echo removed %.1f dB with vs %.1f dB without\n",
+                        on.delay / 48.0, on.shift / 48.0, on.changes, on.latencyStart, on.latency, echo - withAuto, echo - without);
+            EXPECT(on.delay + on.shift >= 12 * 48 - 48 && on.delay + on.shift <= 12 * 48 + 48, "delay %.2f + shift %.2f ms, expected ~12 in total",
+                   on.delay / 48.0, on.shift / 48.0);
             EXPECT(on.changes == 1, "%d delay changes, expected 1", on.changes);
             EXPECT(on.latency == kLat && on.latencyStart == kLat, "latency %d (start %d), expected the fixed %d", on.latency, on.latencyStart, kLat);
             EXPECT(echo - withAuto > (echo - without) + 10.0, "automatic timing gained only %.1f dB", without - withAuto);
@@ -1040,6 +1042,69 @@ int main()
         EXPECT(peakTarget <= ReferenceSync::kStartCap + 960, "target rose to %.1f ms after the pause", peakTarget / 48.0);
         EXPECT(std::fabs(sync.BacklogSamples() - sync.TargetSamples()) <= 480, "backlog %.1f ms vs target %.1f ms",
                sync.BacklogSamples() / 48.0, sync.TargetSamples() / 48.0);
+    }
+
+    {
+        std::printf("echo timing: echo 30 ms BEFORE the reference (beyond the 25 ms mic delay): the reference moves\n");
+        // Clocked, lockstep delivery, 0 ppm. The mic hears the sound the moment it played, but the reference
+        // sits in the queue, so AEC3 sees the echo about 30 ms early. Needed: about 38 ms with the margin, more
+        // than the mic delay alone can give; the reference backlog can shrink to its ~25 ms floor.
+        Settings st = def; st.nsEnabled = 0; st.hpfEnabled = 0; st.lpfEnabled = 0; st.limiterEnabled = 0;
+        constexpr int kSeconds = 90;
+        const int nCap = 48000 * kSeconds;
+        std::mt19937 rng(23);
+        std::normal_distribution<float> g(0.0f, 0.1f);
+        std::vector<float> played(static_cast<size_t>(nCap) + 48000);
+        for (size_t i = 0; i < played.size(); ++i) played[i] = ((i / 24000) % 5 < 3) ? g(rng) : 0.0f;
+        ReferenceRing ring;
+        ring.Init(48000);
+        VoiceProcessor vp;
+        vp.SetReference(&ring);
+        vp.SetEchoTimingSetup(true, 0);
+        vp.Prepare(kCh, 48000, st);
+        std::vector<float> mic(480 * kCh), y(480 * kCh);
+        double echoSq = 0, outSq = 0;
+        float lp = 0;
+        bool capped = false;
+        for (int b = 0; b < nCap / 480; ++b)
+        {
+            const int64_t now = static_cast<int64_t>(b + 1) * 480;
+            ring.Write(played.data() + static_cast<size_t>(b) * 480, 480, now);
+            for (int i = 0; i < 480; ++i)
+            {
+                const int t = b * 480 + i;   // heard the moment it played (an extreme case)
+                const float v = t >= 0 ? played[static_cast<size_t>(t)] : 0.0f;
+                lp += 0.3f * (v - lp);
+                for (int c = 0; c < kCh; ++c) mic[static_cast<size_t>(i) * kCh + c] = 0.5f * lp;
+            }
+            vp.SetClock(now, 48000);
+            vp.Process(mic.data(), y.data(), 480, st);
+            if (b % 100 == 99)
+            {
+                const auto ev = vp.EchoTimingTick();
+                if (ev.decision.change)
+                    std::printf("      %3d s: echo %+.1f ms -> reference moved %.1f ms (total %.1f), mic delay %.1f ms%s\n", (b + 1) / 100,
+                                ev.decision.rawOffsetMs, ev.decision.refShiftSamples / 48.0, ev.refShiftSamples / 48.0,
+                                ev.decision.delaySamples / 48.0, ev.decision.capped ? " CAPPED" : "");
+                if (ev.decision.agreedNow) capped = ev.decision.capped;
+            }
+            if (b >= (kSeconds - 30) * 100)
+                for (int i = 0; i < 480; ++i)
+                {
+                    echoSq += static_cast<double>(mic[static_cast<size_t>(i) * kCh]) * mic[static_cast<size_t>(i) * kCh];
+                    outSq += static_cast<double>(y[static_cast<size_t>(i) * kCh]) * y[static_cast<size_t>(i) * kCh];
+                }
+        }
+        const double removed = 10.0 * std::log10((echoSq + 1e-20) / (outSq + 1e-20));
+        const double total = (vp.MicDelaySamples() + vp.Sync().ShiftSamples()) / 48.0;
+        std::printf("    reference moved %.1f ms, mic delay %.1f ms (total %.1f), backlog target %.1f ms, latency %d; last 30 s %.1f dB\n",
+                    vp.Sync().ShiftSamples() / 48.0, vp.MicDelaySamples() / 48.0, total, vp.Sync().TargetSamples() / 48.0,
+                    vp.LatencyFrames(), removed);
+        EXPECT(vp.Sync().ShiftSamples() > 0, "the reference did not move");
+        EXPECT(total >= 36.0 && total <= 40.0, "total compensation %.1f ms, expected ~38", total);
+        EXPECT(!capped, "still capped");
+        EXPECT(removed > 30.0, "only %.1f dB echo removed", removed);
+        EXPECT(vp.LatencyFrames() == kLat, "latency %d, expected the fixed %d", vp.LatencyFrames(), kLat);
     }
 
     std::printf(g_failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", g_failures);

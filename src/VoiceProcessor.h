@@ -79,11 +79,13 @@ public:
     // Automatic echo timing. Call before Prepare (non-RT). initialDelay = 48 kHz samples remembered for this
     // microphone (applied from the first block and included in the latency); ignored without a reference.
     // initialRatePpm = the reference rate correction remembered for this microphone.
-    void SetEchoTimingSetup(bool automatic, int initialDelay, double initialRatePpm = 0.0) noexcept
+    // initialShift = how far the reference was moved earlier (48 kHz samples), remembered for this microphone.
+    void SetEchoTimingSetup(bool automatic, int initialDelay, double initialRatePpm = 0.0, int initialShift = 0) noexcept
     {
         m_autoTiming = automatic;
         m_initialMicDelay = initialDelay;
         m_initialRatePpm = initialRatePpm;
+        m_initialShift = initialShift;
     }
     struct EchoTimingEvent
     {
@@ -95,6 +97,7 @@ public:
         bool rateChanged = false;              // the reference rate was corrected from the echo slide
         double slidePpm = 0.0;                 // the slide measured (before the correction)
         double ratePpm = 0.0;                  // the reference rate correction now
+        int refShiftSamples = 0;               // total reference shift asked for this stream (48 kHz samples)
     };
     // Non-RT, about once per second, from ONE thread, only while active (stop it before Prepare/Deactivate).
     EchoTimingEvent EchoTimingTick() noexcept;
@@ -306,6 +309,7 @@ private:
     EchoTimingController m_timing;
     std::vector<float> m_t8mic, m_t8ref;
     double m_initialRatePpm = 0.0;
+    int m_initialShift = 0;
     EchoDriftEstimator m_drift;
     int m_driftTicks = 0;
     uint64_t m_driftGuard = 0;   // resyncs + dry blocks at the last tick (a change = a jump: start over)

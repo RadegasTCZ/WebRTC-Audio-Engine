@@ -338,13 +338,15 @@ VoiceProcessor::EchoTimingEvent VoiceProcessor::EchoTimingTick() noexcept
 
     // Echo slide -> reference rate. Points only from clean spans: not while the delay controller settles,
     // and start over after any jump of the reference (resync / dry block) or of the delay.
-    const uint64_t guard = m_sync.Resyncs() + m_sync.DryBlocks();
+    const uint64_t guard = m_sync.Resyncs() + m_sync.DryBlocks() + m_sync.Shifts();
     if (guard != m_driftGuard) { m_drift.Clear(); m_driftGuard = guard; }
     if (ev.result.valid && !m_timing.Settling())
         m_drift.Add(static_cast<double>(m_probe->Written()) / EchoTimingProbe::kRate,
                     ev.result.offsetMs - static_cast<float>(m_timing.Delay()) / 48.0f);
 
-    ev.decision = m_timing.OnResult(ev.result);
+    ev.decision = m_timing.OnResult(ev.result, m_sync.SlackSamples());
+    if (ev.decision.refShiftSamples > 0)
+        m_sync.RequestShift(ev.decision.refShiftSamples);
     if (ev.decision.change)
     {
         m_micDelayTarget.store(ev.decision.delaySamples, std::memory_order_relaxed);
@@ -368,6 +370,7 @@ VoiceProcessor::EchoTimingEvent VoiceProcessor::EchoTimingTick() noexcept
     ev.ratePpm = m_sync.RatePpm();
     ev.delaySamples = m_timing.Delay();
     ev.agreed = m_timing.HasAgreed();
+    ev.refShiftSamples = m_sync.RequestedShiftSamples();
     return ev;
 }
 
@@ -439,6 +442,7 @@ bool VoiceProcessor::Prepare(int channels, int sampleRate, const Settings& initi
     m_refUnderruns = 0;
     m_sync.Reset();
     m_sync.SetRatePpm(m_refRing && m_autoTiming ? m_initialRatePpm : 0.0);
+    m_sync.SetInitialShift(m_refRing && m_autoTiming ? std::clamp(m_initialShift, 0, ReferenceSync::kMaxTarget) : 0);
     m_drift.Clear();
     m_driftTicks = 0;
     m_driftGuard = 0;

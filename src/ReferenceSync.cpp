@@ -73,6 +73,12 @@ void ReferenceSync::Reset() noexcept
     m_refilling = false;
     m_captureGaps = 0;
     m_peakChunk = 0;
+    m_floor = 0;
+    m_shiftApplied = 0;
+    m_shiftReq = 0;
+    m_shiftPub = 0;
+    m_slackPub = 0;
+    m_shifts = 0;
 }
 
 double ReferenceSync::Backlog(const ReferenceRing& ring, int64_t nowTicks, int64_t freq) const noexcept
@@ -173,12 +179,17 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
             // place against the reference and a remembered mic delay stays valid. 40 ms (the old start bound),
             // more if the writes are large: the stamped backlog counts reference not yet delivered, so keep a
             // whole chunk + a block + the look-ahead + 5 ms spare.
-            int target = kStartCap;
+            int base = kStartCap;
+            m_floor = std::clamp((stamped ? m_maxChunk : 0) + n + kHalf + kRate / 200, kMinTarget, kMaxTarget);
             if (stamped)
-                target = std::max(target, m_maxChunk + n + kHalf + kRate / 200);
+                base = std::max(base, m_floor);
             else   // no clock (tests, old hosts): keep what the stream naturally holds, as before
-                target = static_cast<int>(std::lround(m_settleSum / (kSettleBlocks - kSettleBlocks / 2)));
-            m_target = m_settledTarget = std::clamp(target, kMinTarget, kMaxTarget);
+                base = static_cast<int>(std::lround(m_settleSum / (kSettleBlocks - kSettleBlocks / 2)));
+            base = std::clamp(base, kMinTarget, kMaxTarget);
+            // The reference shift asked for so far (this stream or remembered) applies from the start.
+            const int target = std::max(std::min(m_floor, base), base - m_shiftReq.load(std::memory_order_relaxed));
+            m_shiftApplied = base - target;
+            m_target = m_settledTarget = target;
             m_state = State::Running;
             if (backlog > m_target)
             {
@@ -199,7 +210,21 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
     }
     else if (!stalled)
     {
-        if (backlog > m_target + kResyncSamples)
+        const int want = m_shiftReq.load(std::memory_order_relaxed) - m_shiftApplied;
+        const int move = std::min(want, m_target - m_floor);
+        if (move > 0)
+        {
+            // Move the reference: drop `move` samples once (the reference is not heard, so no click; AEC3
+            // sees one delay step and re-aligns).
+            const size_t avail = ring.Available();
+            ring.TrimTo(avail - std::min(avail, static_cast<size_t>(move)));
+            m_target -= move;
+            m_settledTarget -= move;
+            m_fillEma -= move;
+            m_shiftApplied += move;
+            m_shifts.fetch_add(1, std::memory_order_relaxed);
+        }
+        else if (backlog > m_target + kResyncSamples)
         {
             // A burst or a capture stall: drop straight back to the target instead of slewing for minutes.
             const size_t avail = ring.Available();
@@ -218,6 +243,8 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
             m_fillEma += kEma * (backlog - m_fillEma);   // inside the band: the rate alone decides (no chasing)
     }
     m_ratioPpm = (ratio - 1.0) * 1e6;
+    m_shiftPub.store(m_shiftApplied, std::memory_order_relaxed);
+    m_slackPub.store(m_state == State::Running ? std::max(0, m_target - m_floor) : 0, std::memory_order_relaxed);
 
     // Make room (keep kHalf - 1 samples of history before the read position).
     if (m_pos > 2048.0)

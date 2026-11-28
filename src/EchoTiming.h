@@ -61,7 +61,7 @@ public:
     static constexpr int kFrames = 11;
     static constexpr size_t kSpan = static_cast<size_t>(kFrame + (kFrames - 1) * kHop);   // 24576 = 3.07 s
     static constexpr float kMinLagMs = -60.0f, kMaxLagMs = 250.0f;   // searched
-    static constexpr float kActMinMs = -20.0f, kActMaxMs = 120.0f;   // acted on
+    static constexpr float kActMinMs = -45.0f, kActMaxMs = 120.0f;   // acted on (was -20 before the reference could move)
     static constexpr float kMinQuality = 9.0f;
     static constexpr float kMinPeak = 0.03f;
     static constexpr int kMinActiveFrames = 5;
@@ -96,10 +96,13 @@ public:
         float rawOffsetMs = 0.0f;  // echo vs reference without our delay (the agreed value)
         bool capped = false;       // the delay needed was more than kMaxDelayMs
         bool agreedNow = false;    // this result completed an agreement (rawOffsetMs / capped are valid)
+        int refShiftSamples = 0;   // move the reference this much earlier (shorter backlog) now, in addition
     };
 
     void Reset(int currentDelaySamples) noexcept;
-    Decision OnResult(const EchoTimingResult& r) noexcept;
+    // refSlackSamples: how much more the reference backlog can shrink right now (0 = mic delay only).
+    // The reference moves first; the mic delay covers the rest (2026-11-28).
+    Decision OnResult(const EchoTimingResult& r, int refSlackSamples = 0) noexcept;
     int Delay() const noexcept { return m_delay; }
     bool HasAgreed() const noexcept { return m_agreed; }
     bool Settling() const noexcept { return m_settle > 0; }
