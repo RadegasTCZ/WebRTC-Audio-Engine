@@ -152,7 +152,7 @@ namespace
     bool g_recording = false;
     telemetry::Values g_live{};
     bool g_speech = false;          // with ~300 ms hold, so the dots don't flicker on every syllable
-    ULONGLONG g_speechAt = 0, g_alertUntil = 0;
+    ULONGLONG g_speechAt = 0, g_alertUntil = 0, g_syncAlertUntil = 0;
     // Sound is playing but (almost) no echo is being removed, e.g. a headset: shown once it lasts a few seconds
     // (AEC3 needs a moment to converge), cleared as soon as it removes a clear amount again.
     bool g_noEcho = false;
@@ -177,6 +177,10 @@ namespace
         if (g_recording && Sane(g_live.speech, 0.0f, 1.0f) >= 0.5f) { g_speech = true; g_speechAt = now; }
         else if (now - g_speechAt > 300) g_speech = false;
         if (g_recording && Sane(g_live.limiterDb, 0.0f, 99.0f) > 1.0f) g_alertUntil = now + 300;
+        // Echo timing out of order (2026-11-28): the reference queue far above its normal ~40 ms (the bug that
+        // pinned it near 80 ms), or an echo too early to line up. Held 2 s so a single meter does not flicker.
+        if (g_recording && g_live.aecRunning && (Sane(g_live.refBacklogMs, 0.0f, 999.0f) > 60.0f || g_live.timingCapped))
+            g_syncAlertUntil = now + 2000;
 
         const bool playing = g_recording && g_live.aecRunning && g_live.referenceDbfs >= -70.0f;
         const float removed = Sane(g_live.echoRemovedDb, 0.0f, 99.0f);
@@ -240,8 +244,22 @@ namespace
         case ROW_AEC:
             if (!g_live.aecRunning) { detail = L"No speaker reference for this recording"; return ui::Dot::Hold; }
             if (!(g_live.referenceDbfs >= -70.0f)) { detail = L"Waiting: nothing playing"; return ui::Dot::Hold; }
+            if (GetTickCount64() < g_syncAlertUntil)
+            {
+                // Red: what is wrong, in one short line.
+                if (g_live.timingCapped)
+                    _snwprintf_s(buf, _TRUNCATE, L"Removing echo \x00B7 %.0f dB \x00B7 echo too early!", Sane(g_live.echoRemovedDb, 0.0f, 99.0f));
+                else
+                    _snwprintf_s(buf, _TRUNCATE, L"Removing echo \x00B7 %.0f dB \x00B7 ref %.0f ms!", Sane(g_live.echoRemovedDb, 0.0f, 99.0f),
+                                 Sane(g_live.refBacklogMs, 0.0f, 999.0f));
+                detail = buf;
+                return ui::Dot::Alert;
+            }
             if (g_noEcho) { detail = L"Sound playing \x00B7 no echo picked up"; return ui::Dot::Lit; }
-            _snwprintf_s(buf, _TRUNCATE, L"Removing echo \x00B7 %.0f dB", Sane(g_live.echoRemovedDb, 0.0f, 99.0f));
+            if (g_live.aecDelayMs >= 0 && g_live.aecDelayMs < 1000)
+                _snwprintf_s(buf, _TRUNCATE, L"Removing echo \x00B7 %.0f dB \x00B7 %d ms", Sane(g_live.echoRemovedDb, 0.0f, 99.0f), g_live.aecDelayMs);
+            else
+                _snwprintf_s(buf, _TRUNCATE, L"Removing echo \x00B7 %.0f dB", Sane(g_live.echoRemovedDb, 0.0f, 99.0f));
             detail = buf;
             return ui::Dot::Lit;
         case ROW_NS:

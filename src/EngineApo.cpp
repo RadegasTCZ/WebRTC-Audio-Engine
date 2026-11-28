@@ -852,6 +852,12 @@ STDMETHODIMP_(void) CEngineApo::APOProcess(UINT32 u32NumInputConnections, APO_CO
                 d.aecRunning = mt.aecRunning ? 1u : 0u;
                 d.speech = mt.speech;
                 d.sampleRate = static_cast<uint32_t>(m_proc.SampleRate());
+                d.aecDelayMs = mt.aecDelayMs;
+                d.micDelayMs = static_cast<float>(m_proc.MicDelaySamples()) / 48.0f;
+                d.refShiftMs = static_cast<float>(m_proc.Sync().ShiftSamples()) / 48.0f;
+                d.refBacklogMs = mt.refBacklog / 48.0f;
+                d.refTargetMs = static_cast<float>(mt.refTarget) / 48.0f;
+                d.timingCapped = m_timingCapped.load(std::memory_order_relaxed) ? 1u : 0u;
                 telemetry::Publish(m_telemetry, m_telemetryKey, d);
             }
         }

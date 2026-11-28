@@ -11,8 +11,8 @@
 // real-time path; slots are claimed on non-real-time threads.
 namespace telemetry
 {
-    inline constexpr wchar_t kSectionName[] = L"Global\\WebrtcAudioEngineTelemetry4";
-    inline constexpr uint32_t kVersion = 4;
+    inline constexpr wchar_t kSectionName[] = L"Global\\WebrtcAudioEngineTelemetry5";   // 5: echo timing fields (a new name: an old tray never maps the new layout)
+    inline constexpr uint32_t kVersion = 5;
     inline constexpr int kMaxSlots = 8;
     inline constexpr uint64_t kSlotStaleMs = 5000;  // a slot not updated for this long may be reused
 
@@ -27,6 +27,13 @@ namespace telemetry
         uint32_t aecRunning = 0;      // 1 = this stream has an echo reference and AEC3
         uint32_t sampleRate = 0;
         float speech = 0;             // mean speech probability 0..1 over the last ~100 ms (AGC2 voice detector)
+        // Echo timing (version 5, 2026-11-28)
+        int32_t aecDelayMs = -1;      // AEC3's own echo delay estimate; -1 = no AEC3
+        float micDelayMs = 0;         // our mic delay (inside the fixed latency)
+        float refShiftMs = 0;         // how far the reference was moved earlier
+        float refBacklogMs = 0;       // echo reference backlog (smoothed)
+        float refTargetMs = 0;        // the backlog it aims for
+        uint32_t timingCapped = 0;    // 1 = the echo came too early to line up (beyond mic delay + reference slack)
     };
 
     struct Slot

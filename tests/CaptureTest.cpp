@@ -42,9 +42,11 @@ int wmain(int argc, wchar_t** argv)
             for (int k = 0; k < n; ++k)
             {
                 const auto& d = devs[k].values;
-                std::wprintf(L"[%ls] in %6.1f out %6.1f ref %6.1f dBFS | echo removed %5.1f dB agc %+5.1f dB limiter %4.1f dB | aec %u %u Hz\n",
+                std::wprintf(L"[%ls] in %6.1f out %6.1f ref %6.1f dBFS | echo removed %5.1f dB agc %+5.1f dB limiter %4.1f dB | aec %u %u Hz"
+                             L" | aec3 delay %d ms, mic %+.1f, ref moved %.1f, backlog %.1f/%.1f ms%s\n",
                              devs[k].name, d.inputDbfs, d.outputDbfs, d.referenceDbfs, d.echoRemovedDb, d.agcGainDb, d.limiterDb,
-                             d.aecRunning, d.sampleRate);
+                             d.aecRunning, d.sampleRate, d.aecDelayMs, d.micDelayMs, d.refShiftMs, d.refBacklogMs, d.refTargetMs,
+                             d.timingCapped ? L" CAPPED" : L"");
             }
             Sleep(200);
         }
