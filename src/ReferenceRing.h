@@ -74,10 +74,12 @@ public:
     }
     // Consumer side: drop exactly n of the queued samples (fewer if not that many). Relative to the read
     // position, so a write landing meanwhile is kept (TrimTo(Available() - n) would drop it too).
-    void Drop(size_t n) noexcept
+    size_t Drop(size_t n) noexcept   // returns how many were dropped
     {
         const size_t r = m_r.load(std::memory_order_relaxed), w = m_w.load(std::memory_order_acquire);
-        m_r.store(r + std::min(n, w - r), std::memory_order_release);
+        const size_t d = std::min(n, w - r);
+        m_r.store(r + d, std::memory_order_release);
+        return d;
     }
     // Consumer side: drop samples so that at most `keep` remain (bounds the reference delay).
     void TrimTo(size_t keep) noexcept

@@ -203,8 +203,8 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
             int req = m_shiftReq.load(std::memory_order_relaxed);
             const int target = std::max(std::min(m_floor, base), base - req);
             m_shiftApplied = base - target;
-            // A request beyond what fits is dropped (it would otherwise eat the jitter bumps later). A request
-            // the timer adds meanwhile makes the exchange fail and is kept.
+            // A request beyond what fits is dropped (it would otherwise eat the jitter bumps later). The timer
+            // cannot add one meanwhile in practice: slack is published as 0 during the whole settle.
             while (req > m_shiftApplied && !m_shiftReq.compare_exchange_weak(req, m_shiftApplied, std::memory_order_relaxed))
             {
             }
@@ -241,12 +241,14 @@ bool ReferenceSync::Pull(ReferenceRing& ring, float* out, int n, int64_t nowTick
         {
             // Move the reference: drop `move` samples once (the reference is not heard, so no click; AEC3
             // sees one delay step and re-aligns).
-            ring.Drop(static_cast<size_t>(move));
-            m_target -= move;
-            m_settledTarget -= move;
-            m_fillEma -= move;
-            m_shiftApplied += move;
-            m_shifts.fetch_add(1, std::memory_order_relaxed);
+            // Book what was really dropped: the backlog counts reference extrapolated from the last write, so
+            // right after a speaker pause less may be queued than the move.
+            const int moved = static_cast<int>(ring.Drop(static_cast<size_t>(move)));
+            m_target -= moved;
+            m_settledTarget -= moved;
+            m_fillEma -= moved;
+            m_shiftApplied += moved;
+            if (moved > 0) m_shifts.fetch_add(1, std::memory_order_relaxed);
         }
         else if (backlog > m_target + kResyncSamples)
         {

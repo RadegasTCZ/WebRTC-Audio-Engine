@@ -26,7 +26,7 @@
 // - |backlog - target| > 25 ms (a stall, a burst, or a wrong rate with no echo to correct it): resync at once
 //   (too little: wait until the target is reached again).
 // - An isolated dry block raises the target by one block (at most 20 ms per settle); 5+ in a row are a
-//   stall (relearn on return). A capture pause (> 50 ms between our reads) drops the queued reference.
+//   stall (relearn on return). A capture pause (> 250 ms between our reads) drops the queued reference.
 // Real-time safe: no allocation, no locks.
 class ReferenceSync
 {
