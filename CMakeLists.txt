@@ -47,6 +47,17 @@ target_link_libraries(voice_core PUBLIC webrtc_apm settings_core)
 # App icon: drawn at build time by MakeIcon from app/Glyph.h (the same drawing as the tray icon).
 add_executable(MakeIcon tools/MakeIcon.cpp app/Glyph.h)
 set(APP_ICON_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+
+# Version resource numbers (src/VersionInfo.rc.inc). A development version.h (major.minor from the component
+# INF's DriverVer, then 0.0) is written only when there is none: scripts/Build-Package.ps1 writes the release
+# one (the driver packages' version) and rebuilds the binaries, and a later configure must not undo that.
+if(NOT EXISTS ${APP_ICON_DIR}/version.h)
+  file(STRINGS package/component/WebrtcAudioEngine.inf WAE_DRIVERVER REGEX "^DriverVer")
+  string(REGEX MATCH "([0-9]+)[.]([0-9]+)[.][0-9]+[.][0-9]+" _ "${WAE_DRIVERVER}")
+  set(WAE_DEV_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.0.0")
+  set(WAE_DEV_BIN "${CMAKE_MATCH_1},${CMAKE_MATCH_2},0,0")
+  configure_file(cmake/version.h.in ${APP_ICON_DIR}/version.h @ONLY)
+endif()
 add_custom_command(OUTPUT ${APP_ICON_DIR}/WebrtcAudioEngine.ico
     COMMAND ${CMAKE_COMMAND} -E make_directory ${APP_ICON_DIR}
     COMMAND MakeIcon ${APP_ICON_DIR}/WebrtcAudioEngine.ico
@@ -66,7 +77,9 @@ add_library(WebrtcVoiceApo SHARED
   src/EngineApo.h
   src/Guids.h
   src/WebrtcVoiceApo.def
+  src/WebrtcVoiceApo.rc
 )
+target_include_directories(WebrtcVoiceApo PRIVATE ${APP_ICON_DIR})   # version.h for the version resource
 target_link_libraries(WebrtcVoiceApo PRIVATE voice_core)
 
 target_compile_definitions(WebrtcVoiceApo PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -82,7 +95,8 @@ target_link_libraries(WebrtcVoiceApo PRIVATE
 )
 
 # --- MSI custom actions (installer/Product.wxs, built into an MSI by scripts/Build-Msi.ps1)
-add_library(SetupActions SHARED installer/SetupActions.cpp)
+add_library(SetupActions SHARED installer/SetupActions.cpp installer/SetupActions.rc)
+target_include_directories(SetupActions PRIVATE ${APP_ICON_DIR})
 target_compile_definitions(SetupActions PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(SetupActions PRIVATE /W4 /permissive- /EHsc /guard:cf)
 target_link_options(SetupActions PRIVATE /guard:cf)

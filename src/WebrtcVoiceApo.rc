@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
+// Version resource of the effect pack DLL (no manifest here: an APO DLL with one fails to load in audiodg).
+#define VI_DESCRIPTION "WebRTC Audio Engine effect pack (echo cancellation, noise suppression, AGC)"
+#define VI_FILENAME    "WebrtcVoiceApo.dll"
+#define VI_FILETYPE    VFT_DLL
+#include "VersionInfo.rc.inc"

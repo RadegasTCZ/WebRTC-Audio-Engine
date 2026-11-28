@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 RadegasTCZ
+// Version resource of the MSI custom-action DLL.
+#define VI_DESCRIPTION "WebRTC Audio Engine installer actions"
+#define VI_FILENAME    "SetupActions.dll"
+#define VI_FILETYPE    VFT_DLL
+#include "../src/VersionInfo.rc.inc"

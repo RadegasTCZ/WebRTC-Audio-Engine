@@ -1,0 +1,4 @@
+// Development build: scripts/Build-Package.ps1 writes the release version here before packaging.
+#define WAE_VERSION_BIN   @WAE_DEV_BIN@
+#define WAE_VERSION_STR   "@WAE_DEV_VERSION@ (development build)"
+#define WAE_VERSION_FLAGS VS_FF_PRERELEASE

@@ -26,6 +26,27 @@ $now = [datetime]::UtcNow + [TimeZoneInfo]::Local.BaseUtcOffset
 $build = '{0}.{1}' -f [int]($now.Date - [datetime]'2026-01-01').TotalDays, [int][math]::Floor($now.TimeOfDay.TotalSeconds / 2)
 $payload = @{ component = $DllPath; app = $AppExe }
 
+# The binaries carry the same version as the packages (Explorer > Properties > Details): write it into the
+# build's version.h (src/VersionInfo.rc.inc) and rebuild them. major.minor from the component INF.
+$buildDir = Join-Path $WorkspaceRoot 'build'
+if ($DllPath -eq $DefaultDll -and $AppExe -eq $DefaultAppExe -and (Test-Path (Join-Path $buildDir 'CMakeCache.txt'))) {
+    $srcInf = [IO.File]::ReadAllText((Join-Path $PackageSrc "component\$ComponentInf"))
+    if ($srcInf -notmatch 'DriverVer\s*=\s*[^,\r\n]+,\s*(\d+)\.(\d+)\.\d+\.\d+') { throw "No DriverVer in $ComponentInf" }
+    $fileVersion = '{0}.{1}.{2}' -f $Matches[1], $Matches[2], $build
+    $versionH = Join-Path $buildDir 'generated\version.h'
+    New-Item -ItemType Directory -Force (Split-Path $versionH) | Out-Null
+    [IO.File]::WriteAllText($versionH, (@(
+        '// Written by scripts/Build-Package.ps1: the version of the packages built from these binaries.',
+        ('#define WAE_VERSION_BIN   {0}' -f ($fileVersion -replace '\.', ',')),
+        ('#define WAE_VERSION_STR   "{0}"' -f $fileVersion),
+        '#define WAE_VERSION_FLAGS 0', '') -join "`r`n"))
+    Write-Host "Rebuilding the binaries as version $fileVersion..."
+    $o = & cmake --build $buildDir --config Release --target WebrtcVoiceApo WebrtcAudioEngineSettings SetupActions 2>&1
+    if ($LASTEXITCODE) { $o | Write-Host; throw 'Rebuilding with the version resource failed' }
+} else {
+    Write-Warning 'Custom binaries or no CMake build: their version resource is left as built.'
+}
+
 foreach ($part in 'component', 'app', 'extension') {
     $dst = Join-Path $PackageOut $part
     if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }

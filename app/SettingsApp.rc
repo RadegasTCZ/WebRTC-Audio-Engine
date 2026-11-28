@@ -3,3 +3,9 @@
 // App icon (taskbar, title bar, Alt+Tab, Explorer, Start menu). Generated at build time by
 // tools/MakeIcon.cpp into the build's "generated" folder, which CMake puts on the include path.
 1 ICON "WebrtcAudioEngine.ico"
+
+// Version resource (Explorer > Properties > Details, Task Manager's description).
+#define VI_DESCRIPTION "WebRTC Audio Engine settings"
+#define VI_FILENAME    "WebrtcAudioEngineSettings.exe"
+#define VI_FILETYPE    VFT_APP
+#include "../src/VersionInfo.rc.inc"
